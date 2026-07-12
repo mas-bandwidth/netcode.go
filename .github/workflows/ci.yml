@@ -30,10 +30,62 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test -count=1 ./...
+        run: go test -count=1 -coverprofile=coverage.out ./...
 
       - name: Test (race)
         run: go test -race -count=1 ./...
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  # wire compatibility with the C reference implementation, enforced two ways:
+  #
+  # 1. the golden wire vectors in testdata/ are regenerated from the C
+  #    implementation's main branch and must match the committed ones byte for
+  #    byte (this catches drift on either side), and
+  #
+  # 2. live interop: real handshakes and payload exchange over UDP loopback
+  #    between this implementation and the C client and server binaries, in
+  #    both directions.
+  wire-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout the C reference implementation
+        uses: actions/checkout@v4
+        with:
+          repository: mas-bandwidth/netcode
+          path: netcode-c
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Build the C reference implementation
+        run: |
+          cmake -S netcode-c -B netcode-c/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build netcode-c/build --parallel
+
+      - name: Regenerate golden wire vectors from the C implementation and compare
+        run: |
+          cc -O2 -I netcode-c -I netcode-c/sodium -o /tmp/generate_vectors testdata/generate_vectors.c netcode-c/sodium/sodium.c
+          mkdir -p /tmp/vectors
+          /tmp/generate_vectors /tmp/vectors
+          for vector in testdata/*.bin; do
+            cmp "$vector" "/tmp/vectors/$(basename "$vector")"
+          done
+
+      - name: Golden wire vector tests
+        run: go test -run TestWireCompat -v -count=1 .
+
+      - name: Live interop with the C client and server
+        run: NETCODE_C_BIN_DIR=$PWD/netcode-c/build/bin go test -run TestCInterop -v -count=1 .
 
   lint:
     runs-on: ubuntu-latest
