@@ -1,0 +1,16 @@
+# coverage measures the library, not the example programs, and is
+# informational: PRs are gated by the tests, lint, and the wire
+# compatibility checks, not by a coverage percentage.
+
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+ignore:
+  - "cmd/**"
+  - "testdata/**"
