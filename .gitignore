@@ -1,0 +1,8 @@
+# Binaries
+*.exe
+*.test
+*.out
+
+# Coverage
+cover.out
+coverage.html
