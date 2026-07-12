@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"syscall"
 )
 
 const (
@@ -66,7 +65,7 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 
 	conn, err := net.ListenUDP(network, net.UDPAddrFromAddrPort(address.toNetip()))
 	if err != nil {
-		bind := errors.Is(err, syscall.EADDRINUSE) || errors.Is(err, syscall.EACCES)
+		bind := isBindError(err)
 		printf(LogLevelError, "error: failed to %s socket (%s)\n", map[bool]string{true: "bind", false: "create"}[bind], network)
 		return nil, &socketError{bind: bind, err: err}
 	}

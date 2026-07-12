@@ -1080,29 +1080,27 @@ func TestClientCreateError(t *testing.T) {
 
 	// binding a second client to a port already in use fails at socket creation (ipv4)
 
-	{
+	func() {
 		firstClient, err := NewClient("127.0.0.1:50000", nil, 0.0)
 		check(t, err == nil)
+		defer firstClient.Close()
 
 		client, err := NewClient("127.0.0.1:50000", nil, 0.0)
 		check(t, client == nil)
 		check(t, errors.Is(err, ErrClientCreateSocketIPv4Failed))
-
-		firstClient.Close()
-	}
+	}()
 
 	// and the same over ipv6 reports the ipv6 error
 
-	{
+	func() {
 		firstClient, err := NewClient("[::1]:50000", nil, 0.0)
 		check(t, err == nil)
+		defer firstClient.Close()
 
 		client, err := NewClient("[::1]:50000", nil, 0.0)
 		check(t, client == nil)
 		check(t, errors.Is(err, ErrClientCreateSocketIPv6Failed))
-
-		firstClient.Close()
-	}
+	}()
 }
 
 func TestServerCreateError(t *testing.T) {
@@ -1133,29 +1131,27 @@ func TestServerCreateError(t *testing.T) {
 
 	// a port already in use is reported as a bind failure, distinct from other socket errors (ipv4)
 
-	{
+	func() {
 		firstServer, err := NewServer("127.0.0.1:40000", nil, 0.0)
 		check(t, err == nil)
+		defer firstServer.Close()
 
 		server, err := NewServer("127.0.0.1:40000", nil, 0.0)
 		check(t, server == nil)
 		check(t, errors.Is(err, ErrServerBindSocketIPv4Failed))
-
-		firstServer.Close()
-	}
+	}()
 
 	// and the same over ipv6 reports the ipv6 bind error
 
-	{
+	func() {
 		firstServer, err := NewServer("[::1]:40000", nil, 0.0)
 		check(t, err == nil)
+		defer firstServer.Close()
 
 		server, err := NewServer("[::1]:40000", nil, 0.0)
 		check(t, server == nil)
 		check(t, errors.Is(err, ErrServerBindSocketIPv6Failed))
-
-		firstServer.Close()
-	}
+	}()
 }
 
 func TestNetworkSimulatorDeterminism(t *testing.T) {
