@@ -114,9 +114,7 @@ func ParseAddress(addressString string) (Address, error) {
 
 		// if a port is omitted, strip the trailing ']' so "[addr]" parses as just the address
 
-		if strings.HasSuffix(s, "]") {
-			s = s[:len(s)-1]
-		}
+		s = strings.TrimSuffix(s, "]")
 
 		s = s[1:]
 	}

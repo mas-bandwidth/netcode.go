@@ -284,10 +284,11 @@ func (client *Client) processPacketInternal(from *Address, p packet, sequence ui
 
 	case *connectionKeepAlive:
 		if from.Equal(client.serverAddress) {
-			if client.state == ClientStateConnected {
+			switch client.state {
+			case ClientStateConnected:
 				printf(LogLevelDebug, "client received connection keep alive packet from server\n")
 				client.lastPacketReceiveTime = client.time
-			} else if client.state == ClientStateSendingConnectionResponse {
+			case ClientStateSendingConnectionResponse:
 				printf(LogLevelDebug, "client received connection keep alive packet from server\n")
 				client.lastPacketReceiveTime = client.time
 				client.clientIndex = int(t.clientIndex)
@@ -368,9 +369,10 @@ func (client *Client) receivePackets() {
 				packetData = data
 			} else {
 				var s *socket
-				if client.serverAddress.Type == AddressIPv4 {
+				switch client.serverAddress.Type {
+				case AddressIPv4:
 					s = client.socketHolder.ipv4
-				} else if client.serverAddress.Type == AddressIPv6 {
+				case AddressIPv6:
 					s = client.socketHolder.ipv6
 				}
 				if s == nil {

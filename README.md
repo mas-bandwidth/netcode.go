@@ -1,6 +1,7 @@
 # netcode.go
 
 [![CI](https://github.com/mas-bandwidth/netcode.go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mas-bandwidth/netcode.go/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/mas-bandwidth/netcode.go.svg)](https://pkg.go.dev/github.com/mas-bandwidth/netcode.go)
 
 **netcode** is a secure client/server protocol for multiplayer games built on top of UDP.
 
@@ -85,6 +86,18 @@ server.Update(time)
 ```
 
 For more details please see the example programs [cmd/client](cmd/client/main.go), [cmd/server](cmd/server/main.go) and [cmd/client_server](cmd/client_server/main.go), and the API documentation at [pkg.go.dev](https://pkg.go.dev/github.com/mas-bandwidth/netcode.go).
+
+# Development
+
+```
+go test                                        # run the test suite
+go test -race                                  # ...with the race detector
+go test -run='^$' -bench=. -benchmem           # benchmarks
+go test -fuzz=FuzzReadPacket -fuzztime=60s     # fuzz the packet reader
+go run ./cmd/soak                              # soak test, ctrl-C to stop
+```
+
+The fuzz targets (`FuzzReadPacket`, `FuzzWriteReadPacketRoundTrip`, `FuzzParseAddress`, `FuzzReadConnectToken`, `FuzzReadConnectTokenPrivate`, `FuzzConnectTokenPrivateRoundTrip`) are ports of the libFuzzer harnesses in the C implementation. CI runs tests on Linux, macOS and Windows, plus [golangci-lint](https://golangci-lint.run), `govulncheck`, formatting and `go.mod` tidiness checks, a short fuzz pass, and a soak run.
 
 # Notes for users of the C library
 

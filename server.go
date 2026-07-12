@@ -685,7 +685,7 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 
 	var sequence uint64
 
-	encryptionIndex := -1
+	var encryptionIndex int
 	clientIndex := server.findClientIndexByAddress(from)
 	if clientIndex != -1 {
 		encryptionIndex = server.clientEncryptionIndex[clientIndex]

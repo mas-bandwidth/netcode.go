@@ -80,7 +80,7 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 			size /= 2
 			if size < 256*1024 {
 				printf(LogLevelError, "error: failed to set socket send buffer size\n")
-				conn.Close()
+				_ = conn.Close()
 				return nil, &socketError{err: errors.New("netcode: failed to set socket send buffer size")}
 			}
 		}
@@ -95,7 +95,7 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 			size /= 2
 			if size < 256*1024 {
 				printf(LogLevelError, "error: failed to set socket receive buffer size\n")
-				conn.Close()
+				_ = conn.Close()
 				return nil, &socketError{err: errors.New("netcode: failed to set socket receive buffer size")}
 			}
 		}
@@ -109,7 +109,7 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 	if packetTaggingEnabled {
 		if err := enablePacketTagging(conn, address.Type == AddressIPv6); err != nil {
 			printf(LogLevelError, "error: failed to enable packet tagging (%s)\n", network)
-			conn.Close()
+			_ = conn.Close()
 			return nil, &socketError{err: fmt.Errorf("netcode: failed to enable packet tagging: %w", err)}
 		}
 	}
@@ -155,7 +155,9 @@ func (s *socket) readLoop() {
 }
 
 func (s *socket) sendPacket(to *Address, packetData []byte) {
-	s.conn.WriteToUDPAddrPort(packetData, to.toNetip())
+	// UDP send is fire and forget: errors are deliberately ignored, matching
+	// the C implementation
+	_, _ = s.conn.WriteToUDPAddrPort(packetData, to.toNetip())
 }
 
 // receivePacket returns the next buffered packet, or false if none are pending.
@@ -171,7 +173,7 @@ func (s *socket) receivePacket() (receivedPacket, bool) {
 
 func (s *socket) destroy() {
 	if s != nil && s.conn != nil {
-		s.conn.Close()
+		_ = s.conn.Close()
 	}
 }
 
