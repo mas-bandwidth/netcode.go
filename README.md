@@ -155,4 +155,15 @@ If you find this software useful, [please consider sponsoring it](https://github
 
 # License
 
-[BSD 3-Clause license](https://opensource.org/licenses/BSD-3-Clause).
+[MBSL](LICENSE).
+
+## Crediting
+
+This library is licensed under the [Más Bandwidth Source License (MBSL)](LICENSE),
+which is BSD 3-Clause plus one clause: products that incorporate it must include
+this credit in their product credits, or in their documentation:
+
+> **Más Bandwidth LLC**
+> netcode.go by Glenn Fiedler
+
+Free to use, source open, credit required. Fair credit keeps open source honest.
