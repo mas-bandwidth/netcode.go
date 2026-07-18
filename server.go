@@ -245,6 +245,12 @@ func (server *Server) Start(maxClients int) {
 	server.running = true
 	server.maxClients = maxClients
 	server.numConnectedClients = 0
+	// global packets (challenge, denied) encrypt with the same per-token server-to-client
+	// keys as per-client packets, whose sequences start at zero, so the global sequence lives
+	// in the top half of the sequence space to keep AEAD nonces disjoint under a shared key.
+	// Stop() also resets it, so it must be re-seeded on every Start(), not just in NewServer,
+	// or a stopped-and-restarted server would reuse nonces.
+	server.globalSequence = 1 << 63
 	server.challengeSequence = 0
 	RandomBytes(server.challengeKey[:])
 
@@ -416,7 +422,9 @@ func (server *Server) Stop() {
 	server.maxClients = 0
 	server.numConnectedClients = 0
 
-	server.globalSequence = 0
+	// never let the global sequence return to zero (see Start): zero would collide AEAD
+	// nonces with per-client packets under the shared key on a restart.
+	server.globalSequence = 1 << 63
 	server.challengeSequence = 0
 	server.challengeKey = [KeyBytes]byte{}
 
