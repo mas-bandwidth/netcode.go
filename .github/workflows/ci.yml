@@ -144,3 +144,30 @@ jobs:
 
       - name: Soak
         run: go run ./cmd/soak 500
+
+  spec-sync:
+    name: STANDARD.md matches upstream
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # STANDARD.md here is a VERBATIM VENDORED COPY of the wire-format
+      # specification that lives in mas-bandwidth/netcode. This job fails if the
+      # two have diverged.
+      #
+      # Why vendor rather than link: an implementer wants the normative text
+      # beside the implementation, at the revision they are reading. Why check:
+      # a duplicated normative document is the same failure as a duplicated
+      # constant, except it drifts silently and the ports are what break.
+      #
+      # If this fails, the upstream spec changed. Read the diff, port whatever
+      # it implies, then copy the new file across in the same commit.
+      - name: Compare against mas-bandwidth/netcode
+        run: |
+          curl -fsSL -o /tmp/upstream-STANDARD.md \
+            https://raw.githubusercontent.com/mas-bandwidth/netcode/main/STANDARD.md
+          if ! diff -u /tmp/upstream-STANDARD.md STANDARD.md; then
+            echo "::error::STANDARD.md has diverged from mas-bandwidth/netcode"
+            exit 1
+          fi
+          echo "STANDARD.md matches upstream"
