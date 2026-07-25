@@ -37,11 +37,15 @@ import "fmt"
 // goroutine at a time. Sockets are read by internal goroutines, but all
 // protocol logic runs on the goroutine that calls Update.
 
+// The version of the C reference implementation this port corresponds to,
+// mirroring NETCODE_VERSION_* in its netcode.h. This is not the version of this
+// Go module, which is tagged independently, and it is not the protocol version
+// on the wire: that is versionInfo below, which never changes.
 const (
-	VersionFull  = "1.3.5"
+	VersionFull  = "1.4.0"
 	VersionMajor = 1
-	VersionMinor = 3
-	VersionPatch = 5
+	VersionMinor = 4
+	VersionPatch = 0
 )
 
 const (
