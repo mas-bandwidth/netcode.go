@@ -5,14 +5,15 @@ and NOT `wirepair/netcode` (a separate, unaffiliated Go netcode, dormant since 2
 linked from our README as a community implementation). Module path ends `.go`; the package is `netcode`.
 
 DECISIONS
-- Three independent version numbers live here. Do not reconcile them.
+- Three version numbers live here. Exactly one of them tracks C.
   1. Module/tag version: its own line, v1.0.0 -> v1.1.0. It does not track C's numbering.
-  2. Exported `VersionFull` "1.3.5": the C version ported FROM, unchanged since the first
-     commit (C is now 1.4.0). No recorded decision says whether it should track C. Treat
-     as UNRESOLVED, ask before changing it, and do not read it as "behind on C".
+  2. Exported `VersionFull` "1.4.0": the C release this port corresponds to, mirroring
+     NETCODE_VERSION_* in C's netcode.h. It DOES track C. This was open until #11: the
+     constant sat at 1.3.5 from the first commit, through C's 1.4.0 security release, so
+     the library advertised a version predating a fix it already carried. CI now enforces
+     the match (version-sync). Bump all four Full/Major/Minor/Patch together.
   3. `versionInfo` "NETCODE 1.02": the on-the-wire PROTOCOL version. It never moves.
 - C 1.4.0's AEAD nonce-reuse fix IS ported: commit 2336bed (C dc21b70), shipped in v1.1.0.
-  `VersionFull` saying 1.3.5 does not mean that fix is missing.
 
 INVARIANTS
 - Wire compatibility with the C reference is the prime directive. C is normative: where the
@@ -21,8 +22,9 @@ INVARIANTS
   UDP interop against the built C binaries in both directions.
 
 TRAPS
-- CI checks out C main unpinned (wire-compat, spec-sync), so an upstream C commit can redden
-  this repo with no change here. Read the C diff first.
+- CI reads C main unpinned (wire-compat, spec-sync, version-sync), so an upstream C commit can
+  redden this repo with no change here. Read the C diff first. A C release reddens version-sync
+  until `VersionFull` catches up.
 - STANDARD.md is a verbatim vendored copy of the C repo's; spec-sync diffs it against C main.
 - Plain `go test` SKIPS TestCInterop unless NETCODE_C_BIN_DIR points at a built C checkout.
   Green locally does not mean interop passes.
