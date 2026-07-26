@@ -171,3 +171,41 @@ jobs:
             exit 1
           fi
           echo "STANDARD.md matches upstream"
+
+  version-sync:
+    name: VersionFull matches upstream
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # VersionFull in netcode.go reports the release of the C reference
+      # implementation this port corresponds to, mirroring NETCODE_VERSION_FULL
+      # in its netcode.h. Nothing in the build reads it, so it drifts silently:
+      # it shipped as 1.3.5 while C had already moved to 1.4.0, meaning this
+      # library advertised a version predating the AEAD nonce-reuse fix it had
+      # in fact already ported.
+      #
+      # This is NOT the protocol version on the wire. That is versionInfo,
+      # "NETCODE 1.02\0", which is protocol identity and never changes.
+      #
+      # If this fails, upstream cut a release. Read what changed, port whatever
+      # it implies, then bump VersionFull/Major/Minor/Patch in the same commit.
+      - name: Compare against mas-bandwidth/netcode
+        run: |
+          curl -fsSL -o /tmp/upstream-netcode.h \
+            https://raw.githubusercontent.com/mas-bandwidth/netcode/main/netcode.h
+          upstream=$(sed -n 's/^#define[[:space:]]*NETCODE_VERSION_FULL[[:space:]]*"\([^"]*\)".*/\1/p' /tmp/upstream-netcode.h)
+          ours=$(sed -n 's/^[[:space:]]*VersionFull[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' netcode.go)
+          if [ -z "$upstream" ]; then
+            echo "::error::could not find NETCODE_VERSION_FULL in upstream netcode.h"
+            exit 1
+          fi
+          if [ -z "$ours" ]; then
+            echo "::error::could not find VersionFull in netcode.go"
+            exit 1
+          fi
+          if [ "$upstream" != "$ours" ]; then
+            echo "::error::VersionFull is $ours but mas-bandwidth/netcode is $upstream"
+            exit 1
+          fi
+          echo "VersionFull $ours matches upstream"
