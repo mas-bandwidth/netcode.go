@@ -149,7 +149,7 @@ jobs:
     name: STANDARD.md matches upstream
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # STANDARD.md here is a VERBATIM VENDORED COPY of the wire-format
       # specification that lives in mas-bandwidth/netcode. This job fails if the
