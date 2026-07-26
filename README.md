@@ -163,7 +163,6 @@ This library is licensed under the [Más Bandwidth Source License (MBSL)](LICENS
 which is BSD 3-Clause plus one clause: products that incorporate it must include
 this credit in their product credits, or in their documentation:
 
-> **Más Bandwidth LLC**
-> netcode.go by Glenn Fiedler
+> netcode.go by Glenn Fiedler and Rowan Claude
 
 Free to use, source open, credit required. Fair credit keeps open source honest.
