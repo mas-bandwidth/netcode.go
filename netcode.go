@@ -42,7 +42,7 @@ import "fmt"
 // Go module, which is tagged independently, and it is not the protocol version
 // on the wire: that is versionInfo below, which never changes.
 const (
-	VersionFull  = "1.4.0"
+	VersionFull  = "1.4.3"
 	VersionMajor = 1
 	VersionMinor = 4
 	VersionPatch = 0
