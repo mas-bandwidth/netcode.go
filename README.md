@@ -4,6 +4,8 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/mas-bandwidth/netcode.go.svg)](https://pkg.go.dev/github.com/mas-bandwidth/netcode.go)
 [![codecov](https://codecov.io/gh/mas-bandwidth/netcode.go/branch/main/graph/badge.svg)](https://codecov.io/gh/mas-bandwidth/netcode.go)
 
+If this library helps you, please support it: **[Become a supporter](https://www.patreon.com/MasBandwidth/membership)**
+
 **netcode** is a secure client/server protocol for multiplayer games built on top of UDP.
 
 This is the official Go implementation: a faithful port of the [C reference implementation](https://github.com/mas-bandwidth/netcode), written in modern, idiomatic Go. It implements the [netcode 1.02 standard](STANDARD.md) and is wire compatible with the C implementation and every other conforming implementation.
@@ -151,7 +153,7 @@ The author of this library is [Glenn Fiedler](https://www.linkedin.com/in/glenn-
 
 Other open source libraries by the same author include: [reliable](https://github.com/mas-bandwidth/reliable), [serialize](https://github.com/mas-bandwidth/serialize), and [yojimbo](https://github.com/mas-bandwidth/yojimbo).
 
-If you find this software useful, [please consider sponsoring it](https://github.com/sponsors/mas-bandwidth). Thanks!
+If you find this software useful, please consider [becoming a supporter](https://www.patreon.com/MasBandwidth/membership). Thanks!
 
 # License
 
