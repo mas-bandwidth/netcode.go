@@ -189,7 +189,7 @@ func readWireCompatPacket(t *testing.T, vector []byte, expectedSequence uint64) 
 	allowedPackets := allPacketsAllowed()
 
 	var sequence uint64
-	p := readPacket(buffer, &sequence, fixturePacketKey(), fixtureProtocolID, 0, fixturePrivateKey(), &allowedPackets, nil)
+	p := readPacket(buffer, &sequence, fixturePacketKey(), fixtureProtocolID, 0, 0, fixturePrivateKey(), &allowedPackets, nil)
 	if p == nil {
 		t.Fatal("failed to read C-generated packet")
 	}

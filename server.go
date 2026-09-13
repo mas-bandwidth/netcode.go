@@ -23,6 +23,9 @@ const (
 	serverFlagIgnoreConnectionResponsePackets = 1 << 1
 )
 
+// DefaultMaxConnectTokenLifetime is the default connect token lifetime in seconds.
+const DefaultMaxConnectTokenLifetime = 30
+
 // ServerConfig configures a Server. At minimum set ProtocolID and PrivateKey.
 type ServerConfig struct {
 	// ProtocolID is a 64 bit value unique to this particular game/application.
@@ -34,6 +37,13 @@ type ServerConfig struct {
 	// Do not share your private key with anybody, and especially, do not
 	// include it in your client executable!
 	PrivateKey [KeyBytes]byte
+
+	// MaxConnectTokenLifetime is the longest lifetime in seconds that the backend
+	// issues connect tokens with. The server ignores any connection request whose
+	// connect token expire timestamp is earlier than the server start time plus
+	// this lifetime, preventing replays of connect tokens issued before the server
+	// started. If <= 0, DefaultMaxConnectTokenLifetime (30) is used.
+	MaxConnectTokenLifetime int
 
 	// NetworkSimulator, if set, routes all packets through a network simulator
 	// instead of real sockets.
@@ -67,34 +77,35 @@ const serverMaxReceivePackets = 64 * MaxClients
 // goroutine, and drive it by calling Update regularly (for example, 60 times
 // per second).
 type Server struct {
-	config                      ServerConfig
-	socketHolder                socketHolder
-	address                     Address
-	address2                    Address
-	flags                       uint32
-	time                        float64
-	running                     bool
-	maxClients                  int
-	numConnectedClients         int
-	globalSequence              uint64
-	challengeSequence           uint64
-	challengeKey                [KeyBytes]byte
-	clientConnected             [MaxClients]bool
-	clientTimeout               [MaxClients]int32
-	clientLoopback              [MaxClients]bool
-	clientConfirmed             [MaxClients]bool
-	clientDisconnectReason      [MaxClients]int
-	clientEncryptionIndex       [MaxClients]int
-	clientID                    [MaxClients]uint64
-	clientSequence              [MaxClients]uint64
-	clientLastPacketSendTime    [MaxClients]float64
-	clientLastPacketReceiveTime [MaxClients]float64
-	clientUserData              [MaxClients][UserDataBytes]byte
-	clientReplayProtection      [MaxClients]replayProtection
-	clientPacketQueue           [MaxClients]packetQueue
-	clientAddress               [MaxClients]Address
-	connectTokenEntries         [maxConnectTokenEntries]connectTokenEntry
-	encryptionManager           encryptionManager
+	config                         ServerConfig
+	socketHolder                   socketHolder
+	address                        Address
+	address2                       Address
+	flags                          uint32
+	time                           float64
+	running                        bool
+	maxClients                     int
+	numConnectedClients            int
+	globalSequence                 uint64
+	challengeSequence              uint64
+	challengeKey                   [KeyBytes]byte
+	clientConnected                [MaxClients]bool
+	clientTimeout                  [MaxClients]int32
+	clientLoopback                 [MaxClients]bool
+	clientConfirmed                [MaxClients]bool
+	clientDisconnectReason         [MaxClients]int
+	clientEncryptionIndex          [MaxClients]int
+	clientID                       [MaxClients]uint64
+	clientSequence                 [MaxClients]uint64
+	clientLastPacketSendTime       [MaxClients]float64
+	clientLastPacketReceiveTime    [MaxClients]float64
+	clientUserData                 [MaxClients][UserDataBytes]byte
+	clientReplayProtection         [MaxClients]replayProtection
+	clientPacketQueue              [MaxClients]packetQueue
+	clientAddress                  [MaxClients]Address
+	connectTokenEntries            [maxConnectTokenEntries]connectTokenEntry
+	encryptionManager              encryptionManager
+	minConnectTokenExpireTimestamp uint64
 }
 
 func serverCreateSocket(address *Address, config *ServerConfig) (*socket, error) {
@@ -132,6 +143,9 @@ func NewServerDual(serverAddress1String string, serverAddress2String string, con
 	var configCopy ServerConfig
 	if config != nil {
 		configCopy = *config
+	}
+	if configCopy.MaxConnectTokenLifetime <= 0 {
+		configCopy.MaxConnectTokenLifetime = DefaultMaxConnectTokenLifetime
 	}
 	config = &configCopy
 
@@ -253,6 +267,7 @@ func (server *Server) Start(maxClients int) {
 	server.globalSequence = 1 << 63
 	server.challengeSequence = 0
 	RandomBytes(server.challengeKey[:])
+	server.minConnectTokenExpireTimestamp = uint64(time.Now().Unix()) + uint64(server.config.MaxConnectTokenLifetime)
 
 	for i := 0; i < server.maxClients; i++ {
 		server.clientPacketQueue[i].clear()
@@ -484,10 +499,21 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
-	if !connectTokenEntriesFindOrAdd(&server.connectTokenEntries,
+	currentTimestamp := uint64(time.Now().Unix())
+
+	connectTokenEntryIndex := connectTokenEntriesFindOrAdd(&server.connectTokenEntries,
 		from,
 		packet.connectTokenData[connectTokenPrivateBytes-MacBytes:],
-		server.time) {
+		packet.connectTokenExpireTimestamp,
+		currentTimestamp,
+		server.time)
+
+	if connectTokenEntryIndex == connectTokenHistoryFull {
+		printf(LogLevelDebug, "server ignored connection request. connect token history is full\n")
+		return
+	}
+
+	if connectTokenEntryIndex == connectTokenEntryRefused {
 		printf(LogLevelDebug, "server ignored connection request. connect token has already been used\n")
 		return
 	}
@@ -508,7 +534,8 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		connectTokenPrivate.clientToServerKey[:],
 		server.time,
 		expireTime,
-		connectTokenPrivate.timeoutSeconds) {
+		connectTokenPrivate.timeoutSeconds,
+		connectTokenEntryIndex) {
 		printf(LogLevelDebug, "server ignored connection request. failed to add encryption mapping\n")
 		return
 	}
@@ -561,6 +588,13 @@ func (server *Server) connectClient(clientIndex int, address *Address, clientID 
 	server.clientLastPacketSendTime[clientIndex] = server.time
 	server.clientLastPacketReceiveTime[clientIndex] = server.time
 	copy(server.clientUserData[clientIndex][:], userData)
+
+	// the connect token that got this client here is spent: its history entry admits nothing from now on
+
+	connectTokenEntryIndex := server.encryptionManager.getConnectTokenEntryIndex(encryptionIndex)
+	if connectTokenEntryIndex >= 0 {
+		connectTokenEntriesConsume(&server.connectTokenEntries, connectTokenEntryIndex)
+	}
 
 	printf(LogLevelInfo, "server accepted client %s %.16x in slot %d\n", address.String(), clientID, clientIndex)
 
@@ -718,6 +752,7 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 		readPacketKey,
 		server.config.ProtocolID,
 		currentTimestamp,
+		server.minConnectTokenExpireTimestamp,
 		server.config.PrivateKey[:],
 		allowedPackets,
 		replay)

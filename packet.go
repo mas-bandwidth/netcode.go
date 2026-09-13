@@ -176,6 +176,7 @@ func readPacket(buffer []byte,
 	readPacketKey []byte,
 	protocolID uint64,
 	currentTimestamp uint64,
+	minConnectTokenExpireTimestamp uint64,
 	privateKey []byte,
 	allowedPackets *[connectionNumPackets]bool,
 	replayProtection *replayProtection) packet {
@@ -228,6 +229,14 @@ func readPacket(buffer []byte,
 		packetConnectTokenExpireTimestamp := r.uint64()
 		if packetConnectTokenExpireTimestamp <= currentTimestamp {
 			printf(LogLevelDebug, "ignored connection request packet. connect token expired\n")
+			return nil
+		}
+
+		// a connect token that could have been issued before the server started is refused: its keys
+		// were already used to encrypt packets under sequence numbers that start again from zero.
+
+		if packetConnectTokenExpireTimestamp < minConnectTokenExpireTimestamp {
+			printf(LogLevelDebug, "ignored connection request packet. connect token predates the server start\n")
 			return nil
 		}
 

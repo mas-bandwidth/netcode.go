@@ -485,7 +485,7 @@ func TestConnectionRequestPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), connectTokenKey, &allowedPackets, nil).(*connectionRequest)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, connectTokenKey, &allowedPackets, nil).(*connectionRequest)
 
 	check(t, ok)
 
@@ -517,7 +517,7 @@ func TestConnectionDeniedPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), nil, &allowedPackets, nil).(*connectionDenied)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionDenied)
 
 	check(t, ok)
 	check(t, outputPacket != nil)
@@ -545,7 +545,7 @@ func TestConnectionChallengePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), nil, &allowedPackets, nil).(*connectionChallenge)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionChallenge)
 
 	check(t, ok)
 
@@ -576,7 +576,7 @@ func TestConnectionResponsePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), nil, &allowedPackets, nil).(*connectionResponse)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionResponse)
 
 	check(t, ok)
 
@@ -608,7 +608,7 @@ func TestConnectionKeepAlivePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), nil, &allowedPackets, nil).(*connectionKeepAlive)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionKeepAlive)
 
 	check(t, ok)
 
@@ -638,7 +638,7 @@ func TestConnectionPayloadPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), nil, &allowedPackets, nil).(*connectionPayload)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionPayload)
 
 	check(t, ok)
 
@@ -666,7 +666,7 @@ func TestConnectionDisconnectPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), nil, &allowedPackets, nil).(*connectionDisconnect)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionDisconnect)
 
 	check(t, ok)
 	check(t, outputPacket != nil)
@@ -771,7 +771,7 @@ func TestEncryptionManager(t *testing.T) {
 		check(t, manager.getSendKey(encryptionIndex) == nil)
 		check(t, manager.getReceiveKey(encryptionIndex) == nil)
 
-		check(t, manager.addEncryptionMapping(&mappings[i].address, mappings[i].sendKey, mappings[i].receiveKey, currentTime, -1.0, testTimeoutSeconds))
+		check(t, manager.addEncryptionMapping(&mappings[i].address, mappings[i].sendKey, mappings[i].receiveKey, currentTime, -1.0, testTimeoutSeconds, -1))
 
 		encryptionIndex = manager.findEncryptionMapping(&mappings[i].address, currentTime)
 
@@ -817,8 +817,8 @@ func TestEncryptionManager(t *testing.T) {
 
 	// add the encryption mappings back in
 
-	check(t, manager.addEncryptionMapping(&mappings[0].address, mappings[0].sendKey, mappings[0].receiveKey, currentTime, -1.0, testTimeoutSeconds))
-	check(t, manager.addEncryptionMapping(&mappings[numEncryptionMappings-1].address, mappings[numEncryptionMappings-1].sendKey, mappings[numEncryptionMappings-1].receiveKey, currentTime, -1.0, testTimeoutSeconds))
+	check(t, manager.addEncryptionMapping(&mappings[0].address, mappings[0].sendKey, mappings[0].receiveKey, currentTime, -1.0, testTimeoutSeconds, -1))
+	check(t, manager.addEncryptionMapping(&mappings[numEncryptionMappings-1].address, mappings[numEncryptionMappings-1].sendKey, mappings[numEncryptionMappings-1].receiveKey, currentTime, -1.0, testTimeoutSeconds, -1))
 
 	// all encryption mappings should be able to be looked up by address again
 
@@ -858,7 +858,7 @@ func TestEncryptionManager(t *testing.T) {
 		check(t, manager.getSendKey(encryptionIndex) == nil)
 		check(t, manager.getReceiveKey(encryptionIndex) == nil)
 
-		check(t, manager.addEncryptionMapping(&mappings[i].address, mappings[i].sendKey, mappings[i].receiveKey, currentTime, -1.0, testTimeoutSeconds))
+		check(t, manager.addEncryptionMapping(&mappings[i].address, mappings[i].sendKey, mappings[i].receiveKey, currentTime, -1.0, testTimeoutSeconds, -1))
 
 		encryptionIndex = manager.findEncryptionMapping(&mappings[i].address, currentTime)
 
@@ -884,7 +884,7 @@ func TestEncryptionManager(t *testing.T) {
 
 	// test the expire time for encryption mapping works as expected
 
-	check(t, manager.addEncryptionMapping(&mappings[0].address, mappings[0].sendKey, mappings[0].receiveKey, currentTime, currentTime+1.0, testTimeoutSeconds))
+	check(t, manager.addEncryptionMapping(&mappings[0].address, mappings[0].sendKey, mappings[0].receiveKey, currentTime, currentTime+1.0, testTimeoutSeconds, -1))
 
 	encryptionIndex := manager.findEncryptionMapping(&mappings[0].address, currentTime)
 
