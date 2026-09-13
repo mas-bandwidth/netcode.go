@@ -1,10 +1,10 @@
 module github.com/mas-bandwidth/netcode.go
 
-go 1.25.0
+go 1.26.0
 
 require (
 	golang.org/x/crypto v0.55.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 )
 
 // SECURITY: v1.0.0 through v1.0.2 reuse an AEAD (key, nonce) pair across a
