@@ -341,6 +341,7 @@ func (client *Client) ProcessPacket(from *Address, packetData []byte) {
 		readPacketKey,
 		client.connectToken.protocolID,
 		currentTimestamp,
+		0,
 		nil,
 		&allowedPackets,
 		&client.replayProtection)

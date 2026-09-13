@@ -57,6 +57,7 @@ func fuzzReadPacket(buffer []byte, sequence *uint64, replay *replayProtection) p
 		fuzzPacketKey,
 		testProtocolID,
 		0, // current timestamp: zero so fuzz-chosen expire timestamps pass
+		0,
 		fuzzPrivateKey,
 		&allowedPackets,
 		replay)

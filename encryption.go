@@ -8,14 +8,15 @@ const maxEncryptionMappings = MaxClients * 4
 // seconds without being touched, or at an absolute expire time while the
 // client has not yet established a connection.
 type encryptionManager struct {
-	numEncryptionMappings int
-	timeout               [maxEncryptionMappings]int32
-	expireTime            [maxEncryptionMappings]float64
-	lastAccessTime        [maxEncryptionMappings]float64
-	address               [maxEncryptionMappings]Address
-	clientIndex           [maxEncryptionMappings]int
-	sendKey               [maxEncryptionMappings][KeyBytes]byte
-	receiveKey            [maxEncryptionMappings][KeyBytes]byte
+	numEncryptionMappings  int
+	timeout                [maxEncryptionMappings]int32
+	expireTime             [maxEncryptionMappings]float64
+	lastAccessTime         [maxEncryptionMappings]float64
+	address                [maxEncryptionMappings]Address
+	clientIndex            [maxEncryptionMappings]int
+	connectTokenEntryIndex [maxEncryptionMappings]int
+	sendKey                [maxEncryptionMappings][KeyBytes]byte
+	receiveKey             [maxEncryptionMappings][KeyBytes]byte
 }
 
 func (m *encryptionManager) reset() {
@@ -25,6 +26,7 @@ func (m *encryptionManager) reset() {
 
 	for i := 0; i < maxEncryptionMappings; i++ {
 		m.clientIndex[i] = -1
+		m.connectTokenEntryIndex[i] = -1
 		m.expireTime[i] = -1.0
 		m.lastAccessTime[i] = -1000.0
 		m.address[i] = Address{}
@@ -39,12 +41,13 @@ func (m *encryptionManager) entryExpired(index int, time float64) bool {
 		(m.expireTime[index] >= 0.0 && m.expireTime[index] < time)
 }
 
-func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, receiveKey []byte, time, expireTime float64, timeout int32) bool {
+func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, receiveKey []byte, time, expireTime float64, timeout int32, connectTokenEntryIndex int) bool {
 	for i := 0; i < m.numEncryptionMappings; i++ {
 		if m.address[i].Equal(*address) && !m.entryExpired(i, time) {
 			m.timeout[i] = timeout
 			m.expireTime[i] = expireTime
 			m.lastAccessTime[i] = time
+			m.connectTokenEntryIndex[i] = connectTokenEntryIndex
 			copy(m.sendKey[i][:], sendKey)
 			copy(m.receiveKey[i][:], receiveKey)
 			return true
@@ -58,6 +61,7 @@ func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, rece
 			m.address[i] = *address
 			m.expireTime[i] = expireTime
 			m.lastAccessTime[i] = time
+			m.connectTokenEntryIndex[i] = connectTokenEntryIndex
 			copy(m.sendKey[i][:], sendKey)
 			copy(m.receiveKey[i][:], receiveKey)
 			if i+1 > m.numEncryptionMappings {
@@ -75,6 +79,7 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 		if m.address[i].Equal(*address) {
 			m.expireTime[i] = -1.0
 			m.lastAccessTime[i] = -1000.0
+			m.connectTokenEntryIndex[i] = -1
 			m.address[i] = Address{}
 			m.sendKey[i] = [KeyBytes]byte{}
 			m.receiveKey[i] = [KeyBytes]byte{}
@@ -139,4 +144,11 @@ func (m *encryptionManager) getTimeout(index int) int32 {
 		return 0
 	}
 	return m.timeout[index]
+}
+
+func (m *encryptionManager) getConnectTokenEntryIndex(index int) int {
+	if index == -1 {
+		return -1
+	}
+	return m.connectTokenEntryIndex[index]
 }

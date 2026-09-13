@@ -55,7 +55,7 @@ func BenchmarkReadPayloadPacket(b *testing.B) {
 		copy(buffer[:packetBytes], template[:packetBytes])
 
 		var sequence uint64
-		if readPacket(buffer[:packetBytes], &sequence, packetKey, testProtocolID, 0, nil, &allowedPackets, nil) == nil {
+		if readPacket(buffer[:packetBytes], &sequence, packetKey, testProtocolID, 0, 0, nil, &allowedPackets, nil) == nil {
 			b.Fatal("failed to read packet")
 		}
 	}
@@ -97,7 +97,7 @@ func BenchmarkServerProcessConnectionRequest(b *testing.B) {
 		copy(buffer[:packetBytes], template[:packetBytes])
 
 		var sequence uint64
-		if readPacket(buffer[:packetBytes], &sequence, packetKey, testProtocolID, 0, testPrivateKey[:], &allowedPackets, nil) == nil {
+		if readPacket(buffer[:packetBytes], &sequence, packetKey, testProtocolID, 0, 0, testPrivateKey[:], &allowedPackets, nil) == nil {
 			b.Fatal("failed to read packet")
 		}
 	}
