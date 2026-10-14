@@ -165,13 +165,13 @@ func TestWireCompatChallengeToken(t *testing.T) {
 	// encrypting it must produce the C ciphertext
 
 	encrypted := written
-	check(t, encryptChallengeToken(encrypted[:], fixtureChallengeSequence, fixtureChallengeKey()) == nil)
+	check(t, encryptChallengeToken(encrypted[:], fixtureChallengeSequence, nil, fixtureChallengeKey()) == nil)
 	check(t, bytes.Equal(encrypted[:], encryptedVector))
 
 	// the C ciphertext must decrypt and read back to the same fields
 
 	decrypted := [challengeTokenBytes]byte(encryptedVector)
-	check(t, decryptChallengeToken(decrypted[:], fixtureChallengeSequence, fixtureChallengeKey()) == nil)
+	check(t, decryptChallengeToken(decrypted[:], fixtureChallengeSequence, nil, fixtureChallengeKey()) == nil)
 	check(t, bytes.Equal(decrypted[:challengeTokenBytes-MacBytes], plaintextVector[:challengeTokenBytes-MacBytes]))
 
 	var readToken challengeToken
