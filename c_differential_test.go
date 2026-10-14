@@ -494,6 +494,17 @@ func TestCDifferentialConnectionResponse(t *testing.T) {
 	cTranscript := string(cBytes)
 	var goInputs bytes.Buffer
 	goTranscript := connectionResponseTranscript(t, tokens, &goInputs)
+	if cTranscript != goTranscript {
+		cLines := strings.Split(cTranscript, "\n")
+		gLines := strings.Split(goTranscript, "\n")
+		for i := 0; i < len(cLines) && i < len(gLines); i++ {
+			if cLines[i] != gLines[i] {
+				t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+				break
+			}
+		}
+		t.Errorf("C and Go connection-response transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
+	}
 	cInputs, err := os.ReadFile(cTracePath)
 	if err != nil {
 		t.Fatal(err)
@@ -503,19 +514,7 @@ func TestCDifferentialConnectionResponse(t *testing.T) {
 		for first < len(cInputs) && first < goInputs.Len() && cInputs[first] == goInputs.Bytes()[first] {
 			first++
 		}
-		t.Fatalf("C and Go request/response inputs differ at byte %d (C %d bytes, Go %d bytes)",
+		t.Errorf("C and Go request/response inputs differ at byte %d (C %d bytes, Go %d bytes)",
 			first, len(cInputs), goInputs.Len())
 	}
-	if cTranscript == goTranscript {
-		return
-	}
-	cLines := strings.Split(cTranscript, "\n")
-	gLines := strings.Split(goTranscript, "\n")
-	for i := 0; i < len(cLines) && i < len(gLines); i++ {
-		if cLines[i] != gLines[i] {
-			t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
-			break
-		}
-	}
-	t.Errorf("C and Go connection-response transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
 }
