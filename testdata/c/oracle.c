@@ -163,6 +163,24 @@ static int oracle_receive_index;
 static int oracle_receive_consumed;
 static int oracle_receive_processed;
 
+/*
+    The C reference refuses to create a server or client with
+    override_send_and_receive set unless both the send and receive callbacks
+    are non-NULL (netcode.c returns the missing-override-callback create
+    error otherwise). This leg only observes the receive loop, so the send
+    callback is a no-op that drops every packet. Its signature mirrors
+    netcode.h: void (*)(void*, struct netcode_address_t*, NETCODE_CONST
+    uint8_t*, int).
+*/
+static void oracle_send_override( void * context, struct netcode_address_t * to,
+                                  NETCODE_CONST uint8_t * packet_data, int packet_bytes )
+{
+    (void) context;
+    (void) to;
+    (void) packet_data;
+    (void) packet_bytes;
+}
+
 static int oracle_receive_override( void * context, struct netcode_address_t * from,
                                     uint8_t * packet_data, int max_packet_size )
 {
@@ -206,6 +224,7 @@ static void oracle_receive_server( void )
     config.protocol_id = ORACLE_PROTOCOL_ID;
     memcpy( config.private_key, private_key, NETCODE_KEY_BYTES );
     config.override_send_and_receive = 1;
+    config.send_packet_override = oracle_send_override;
     config.receive_packet_override = oracle_receive_override;
 
     server = netcode_server_create( "127.0.0.1:40000", &config, 0.0 );
@@ -224,6 +243,7 @@ static void oracle_receive_client( void )
 
     memset( &config, 0, sizeof( config ) );
     config.override_send_and_receive = 1;
+    config.send_packet_override = oracle_send_override;
     config.receive_packet_override = oracle_receive_override;
 
     client = netcode_client_create( "127.0.0.1:41000", &config, 0.0 );
