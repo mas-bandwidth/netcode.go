@@ -1000,6 +1000,101 @@ func TestServerClientDisconnectReason(t *testing.T) {
 	check(t, server.ClientDisconnectReason(0) == DisconnectReasonNone)
 }
 
+// scriptedReceive plays a fixed queue through the receive override and counts
+// every call. A nil queue entry stands for a datagram to skip (the override
+// result -1): a zero-length datagram or a receive error that the loop must not
+// hand to the packet processor. The returned pointer counts the iterations so a
+// test can assert how many datagrams one Update consumed.
+func scriptedReceive(queue [][]byte) (func() ([]byte, Address, int), *int) {
+	remaining := append([][]byte(nil), queue...)
+	calls := 0
+	return func() ([]byte, Address, int) {
+		if len(remaining) == 0 {
+			return nil, Address{}, 0
+		}
+		item := remaining[0]
+		remaining = remaining[1:]
+		calls++
+		if item == nil {
+			return nil, Address{}, -1
+		}
+		return item, Address{}, len(item)
+	}, &calls
+}
+
+// TestReceiveDrainSkipsEmptyAndStopsAtCap pins the receive loop against the C
+// reference. One Update consumes at most the per-update cap
+// (serverMaxReceivePackets, or clientMaxReceivePackets on the client side), it
+// counts every iteration including skipped zero-length datagrams, and a skip
+// (-1) keeps draining instead of ending the loop. The transport is the override
+// seam, so no socket is opened and no wall clock is read.
+func TestReceiveDrainSkipsEmptyAndStopsAtCap(t *testing.T) {
+	junk := []byte("junk")
+
+	// the server consumes exactly the cap out of cap+10 junk datagrams
+
+	saturated := make([][]byte, serverMaxReceivePackets+10)
+	for i := range saturated {
+		saturated[i] = junk
+	}
+	override, calls := scriptedReceive(saturated)
+	server, err := NewServer("127.0.0.1:40000", &ServerConfig{
+		ProtocolID:             testProtocolID,
+		PrivateKey:             testPrivateKey,
+		OverrideSendAndReceive: true,
+		ReceivePacketOverride:  override,
+	}, 0)
+	check(t, err == nil)
+	defer server.Close()
+	server.Start(1)
+	server.Update(1.0)
+	check(t, *calls == serverMaxReceivePackets)
+
+	// a skipped datagram between two junk datagrams is consumed whole: three
+	// override calls, and the skip does not end the loop
+
+	override, calls = scriptedReceive([][]byte{junk, nil, junk})
+	server, err = NewServer("127.0.0.1:40001", &ServerConfig{
+		ProtocolID:             testProtocolID,
+		PrivateKey:             testPrivateKey,
+		OverrideSendAndReceive: true,
+		ReceivePacketOverride:  override,
+	}, 0)
+	check(t, err == nil)
+	defer server.Close()
+	server.Start(1)
+	server.Update(1.0)
+	check(t, *calls == 3)
+
+	// the client obeys its own cap
+
+	clientSaturated := make([][]byte, clientMaxReceivePackets+10)
+	for i := range clientSaturated {
+		clientSaturated[i] = junk
+	}
+	clientOverride, clientCalls := scriptedReceive(clientSaturated)
+	client, err := NewClient("127.0.0.1:41000", &ClientConfig{
+		OverrideSendAndReceive: true,
+		ReceivePacketOverride:  clientOverride,
+	}, 0)
+	check(t, err == nil)
+	defer client.Close()
+	client.Update(1.0)
+	check(t, *clientCalls == clientMaxReceivePackets)
+
+	// the client drains a [junk, skip, junk] queue whole too
+
+	clientOverride, clientCalls = scriptedReceive([][]byte{junk, nil, junk})
+	client, err = NewClient("127.0.0.1:41001", &ClientConfig{
+		OverrideSendAndReceive: true,
+		ReceivePacketOverride:  clientOverride,
+	}, 0)
+	check(t, err == nil)
+	defer client.Close()
+	client.Update(1.0)
+	check(t, *clientCalls == 3)
+}
+
 func TestClientReconnect(t *testing.T) {
 	simulator := newLossySimulator()
 

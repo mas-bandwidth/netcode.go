@@ -32,9 +32,9 @@
                                   // the same non-zero value shares one
 
     The read path reaches the file-local netcode_read_packet via
-    #include "netcode.c". Its exact signature and the replay/encryption-manager
-    setup below must match the C checkout named by NETCODE_C_DIR; the single
-    call is confined to oracle_read_packet so a mismatch is a one-place fix.
+    #include "netcode.c". Its exact signature and the replay setup below
+    must match the C checkout named by NETCODE_C_DIR; the single call is
+    confined to oracle_read_packet so a mismatch is a one-place fix.
 */
 
 #include "netcode.c"
@@ -72,12 +72,9 @@ static uint32_t read_u32( FILE * f )
     return (uint32_t) b[0] | ( (uint32_t) b[1] << 8 ) | ( (uint32_t) b[2] << 16 ) | ( (uint32_t) b[3] << 24 );
 }
 
-/*
-    The encryption manager and fixed source address the reader resolves the
-    packet key from. Set up once, before the input loop.
-*/
-static struct netcode_encryption_manager_t g_encryption_manager;
-static struct netcode_address_t g_source_address;
+#ifndef NETCODE_CONNECTION_NUM_PACKETS
+#define NETCODE_CONNECTION_NUM_PACKETS 7
+#endif
 
 /*
     Reads one input packet through the C packet reader and prints the result
@@ -90,65 +87,241 @@ static int oracle_read_packet( uint8_t * buffer, int buffer_length,
                                uint64_t * out_sequence,
                                uint8_t * out_type )
 {
-    struct netcode_packet_t packet;
+    uint8_t packet_key[NETCODE_KEY_BYTES];
+    uint8_t private_key[NETCODE_KEY_BYTES];
+    uint8_t allowed_packets[NETCODE_CONNECTION_NUM_PACKETS];
     uint64_t sequence = 0;
-    int result;
+    void * packet;
 
-    memset( &packet, 0, sizeof( packet ) );
+    oracle_packet_key( packet_key );
+    oracle_private_key( private_key );
+    memset( allowed_packets, 1, sizeof( allowed_packets ) );
 
-    /* NOTE: match this call to the checkout's netcode.c. The reference reader
-       resolves the packet key for the source address from an encryption
-       manager and reads the request packet's inner token with the server
-       private key; a single encryption mapping for a fixed address carrying
-       the fixture packet key is set up by oracle_setup below. */
-    result = netcode_read_packet( &packet,
-                                  &g_source_address,
-                                  buffer,
+    packet = netcode_read_packet( buffer,
                                   buffer_length,
-                                  &g_encryption_manager,
-                                  replay_protection,
+                                  &sequence,
+                                  packet_key,
                                   ORACLE_PROTOCOL_ID,
                                   ORACLE_CURRENT_TIMESTAMP,
-                                  &sequence,
+                                  0ULL,
+                                  private_key,
+                                  allowed_packets,
+                                  replay_protection,
                                   NULL,
                                   NULL );
 
     *out_sequence = sequence;
 
-    if ( result != NETCODE_OK )
+    if ( packet == NULL )
     {
         return 0;
     }
 
-    *out_type = packet.packet_type;
+    *out_type = (uint8_t) ( *( (int*) packet ) );
+    free( packet );
     return 1;
 }
 
 static void oracle_setup( void )
 {
-    uint8_t send_key[NETCODE_KEY_BYTES];
-    uint8_t receive_key[NETCODE_KEY_BYTES];
+}
 
-    oracle_packet_key( send_key );
-    oracle_packet_key( receive_key );
+/*
+    Receive drain mode.
 
-    memset( &g_source_address, 0, sizeof( g_source_address ) );
-    g_source_address.type = NETCODE_ADDRESS_IPV4;
-    g_source_address.data.ipv4[0] = 127;
-    g_source_address.data.ipv4[1] = 0;
-    g_source_address.data.ipv4[2] = 0;
-    g_source_address.data.ipv4[3] = 1;
-    g_source_address.port = 40000;
+    Drives the C server or client receive loop with a scripted override that
+    plays the same queues the Go port test plays, and prints one line per case
+    in the form:
 
-    netcode_encryption_manager_reset( &g_encryption_manager, 16, NULL );
-    netcode_encryption_manager_add_mapping( &g_encryption_manager,
-                                            &g_source_address,
-                                            send_key,
-                                            receive_key,
-                                            0.0,
-                                            -1.0,
-                                            15,
-                                            -1 );
+        <queue> <server|client> consumed <n> processed <m>
+
+    consumed counts every datagram the override handed out, including the
+    skipped zero-length datagrams; processed counts the datagrams that reached
+    the packet processor. The override is the only observer, so the two sides
+    are compared on the port's pull behaviour, not on internal counters.
+
+    Input file (all integers little endian):
+
+        uint32 case_count
+        then, per case:
+            uint32 name_length
+            uint8  name[name_length]
+            uint32 side            // 0 = server, 1 = client
+            uint32 item_count
+            int32  item[item_count] // >0 junk length, -1 skip, -2 would-block
+
+    The server and client create/start/update/destroy calls must match the C
+    checkout named by NETCODE_C_DIR; this leg is unverified without one.
+*/
+
+#define ORACLE_RECEIVE_MAX_ITEMS ( 64 * NETCODE_MAX_CLIENTS + 11 )
+#define ORACLE_RECEIVE_MAX_NAME  128
+
+static int oracle_receive_items[ORACLE_RECEIVE_MAX_ITEMS];
+static int oracle_receive_count;
+static int oracle_receive_index;
+static int oracle_receive_consumed;
+static int oracle_receive_processed;
+
+/*
+    The C reference refuses to create a server or client with
+    override_send_and_receive set unless both the send and receive callbacks
+    are non-NULL (netcode.c returns the missing-override-callback create
+    error otherwise). This leg only observes the receive loop, so the send
+    callback is a no-op that drops every packet. Its signature mirrors
+    netcode.h: void (*)(void*, struct netcode_address_t*, NETCODE_CONST
+    uint8_t*, int).
+*/
+static void oracle_send_override( void * context, struct netcode_address_t * to,
+                                  NETCODE_CONST uint8_t * packet_data, int packet_bytes )
+{
+    (void) context;
+    (void) to;
+    (void) packet_data;
+    (void) packet_bytes;
+}
+
+static int oracle_receive_override( void * context, struct netcode_address_t * from,
+                                    uint8_t * packet_data, int max_packet_size )
+{
+    int item;
+
+    (void) context;
+    (void) from;
+
+    if ( oracle_receive_index >= oracle_receive_count )
+        return 0;
+
+    item = oracle_receive_items[oracle_receive_index++];
+
+    if ( item == -2 )
+        return 0;
+
+    if ( item < 0 )
+    {
+        oracle_receive_consumed++;
+        return -1;
+    }
+
+    if ( item > max_packet_size )
+        item = max_packet_size;
+
+    oracle_receive_consumed++;
+    oracle_receive_processed++;
+
+    memset( packet_data, 0x11, item );
+    return item;
+}
+
+static void oracle_receive_server( void )
+{
+    struct netcode_server_config_t config;
+    struct netcode_server_t * server;
+    uint8_t private_key[NETCODE_KEY_BYTES];
+
+    memset( &config, 0, sizeof( config ) );
+    oracle_private_key( private_key );
+    config.protocol_id = ORACLE_PROTOCOL_ID;
+    memcpy( config.private_key, private_key, NETCODE_KEY_BYTES );
+    config.override_send_and_receive = 1;
+    config.send_packet_override = oracle_send_override;
+    config.receive_packet_override = oracle_receive_override;
+
+    server = netcode_server_create( "127.0.0.1:40000", &config, 0.0 );
+    if ( server == NULL )
+        return;
+
+    netcode_server_start( server, 1 );
+    netcode_server_update( server, 1.0 );
+    netcode_server_destroy( server );
+}
+
+static void oracle_receive_client( void )
+{
+    struct netcode_client_config_t config;
+    struct netcode_client_t * client;
+
+    memset( &config, 0, sizeof( config ) );
+    config.override_send_and_receive = 1;
+    config.send_packet_override = oracle_send_override;
+    config.receive_packet_override = oracle_receive_override;
+
+    client = netcode_client_create( "127.0.0.1:41000", &config, 0.0 );
+    if ( client == NULL )
+        return;
+
+    netcode_client_update( client, 1.0 );
+    netcode_client_destroy( client );
+}
+
+static int oracle_receive_main( const char * path )
+{
+    FILE * f;
+    uint32_t case_count, c;
+
+    f = fopen( path, "rb" );
+    if ( !f )
+    {
+        fprintf( stderr, "oracle: could not open %s\n", path );
+        return 1;
+    }
+
+    if ( netcode_init() != NETCODE_OK )
+    {
+        fprintf( stderr, "oracle: netcode_init failed\n" );
+        return 1;
+    }
+
+    case_count = read_u32( f );
+
+    for ( c = 0; c < case_count; c++ )
+    {
+        char name[ORACLE_RECEIVE_MAX_NAME + 1];
+        uint32_t name_length = read_u32( f );
+        uint32_t side, item_count, i;
+
+        if ( name_length > ORACLE_RECEIVE_MAX_NAME )
+        {
+            fprintf( stderr, "oracle: name too long\n" );
+            return 1;
+        }
+        if ( fread( name, 1, name_length, f ) != name_length )
+        {
+            fprintf( stderr, "oracle: short name\n" );
+            return 1;
+        }
+        name[name_length] = '\0';
+
+        side = read_u32( f );
+        item_count = read_u32( f );
+        if ( item_count > ORACLE_RECEIVE_MAX_ITEMS )
+        {
+            fprintf( stderr, "oracle: too many items\n" );
+            return 1;
+        }
+
+        for ( i = 0; i < item_count; i++ )
+            oracle_receive_items[i] = (int) read_u32( f );
+
+        oracle_receive_count = (int) item_count;
+        oracle_receive_index = 0;
+        oracle_receive_consumed = 0;
+        oracle_receive_processed = 0;
+
+        if ( side == 1 )
+            oracle_receive_client();
+        else
+            oracle_receive_server();
+
+        printf( "%s %s consumed %d processed %d\n", name,
+                side == 1 ? "client" : "server",
+                oracle_receive_consumed, oracle_receive_processed );
+    }
+
+    fclose( f );
+    netcode_term();
+
+    return 0;
 }
 
 int main( int argc, char ** argv )
@@ -160,9 +333,16 @@ int main( int argc, char ** argv )
     int group_seen[ORACLE_MAX_GROUPS];
     uint8_t private_key[NETCODE_KEY_BYTES];
 
+    /* receive mode: drive the C server/client receive loops with a scripted
+       override transcript. See oracle_receive_main below. */
+    if ( argc == 3 && strcmp( argv[1], "receive" ) == 0 )
+    {
+        return oracle_receive_main( argv[2] );
+    }
+
     if ( argc != 2 )
     {
-        fprintf( stderr, "usage: %s inputs.bin\n", argv[0] );
+        fprintf( stderr, "usage: %s [receive] inputs.bin\n", argv[0] );
         return 1;
     }
 

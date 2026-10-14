@@ -64,10 +64,14 @@ type ServerConfig struct {
 	// created.
 	OverrideSendAndReceive bool
 	SendPacketOverride     func(to *Address, packetData []byte)
-	ReceivePacketOverride  func() (packetData []byte, from Address, ok bool)
-}
 
-const serverMaxReceivePackets = 64 * MaxClients
+	// ReceivePacketOverride returns the next datagram, mirroring the C
+	// reference receive override: a positive result is the byte count of a
+	// received datagram, 0 means nothing more was received (the queue is
+	// drained), and a negative result means skip this datagram and keep
+	// draining, for example -1 for a zero-length datagram or a receive error.
+	ReceivePacketOverride func() (packetData []byte, from Address, result int)
+}
 
 // Server is the dedicated server side of the netcode protocol. It manages a
 // set of client slots, where each slot from [0,maxClients-1] represents room
@@ -770,16 +774,20 @@ func (server *Server) receivePackets() {
 	currentTimestamp := uint64(time.Now().Unix())
 
 	if server.config.NetworkSimulator == nil {
-		// process packets received from sockets
+		// process packets received from sockets, at most serverMaxReceivePackets
+		// datagrams per update, counting every iteration including skips
 
-		for {
+		for i := 0; i < serverMaxReceivePackets; i++ {
 			var from Address
 			var packetData []byte
 
 			if server.config.OverrideSendAndReceive {
-				data, overrideFrom, ok := server.config.ReceivePacketOverride()
-				if !ok {
+				data, overrideFrom, result := server.config.ReceivePacketOverride()
+				if result == 0 {
 					break
+				}
+				if result < 0 {
+					continue
 				}
 				from = overrideFrom
 				packetData = data
@@ -797,6 +805,10 @@ func (server *Server) receivePackets() {
 				}
 				from = packet.from
 				packetData = packet.data
+			}
+
+			if len(packetData) == 0 {
+				continue
 			}
 
 			server.readAndProcessPacket(&from, packetData, currentTimestamp, &allowedPackets)

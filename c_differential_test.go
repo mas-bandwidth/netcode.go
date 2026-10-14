@@ -203,3 +203,210 @@ func TestCDifferential(t *testing.T) {
 	}
 	t.Errorf("C and Go transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
 }
+
+// receiveDrainCase is one scripted receive queue for the drain differential.
+// Each item is a datagram the override returns: a positive junk length, -1 for
+// a zero-length datagram (skip), or -2 for would-block (nothing more). The
+// queue always ends with would-block, so a queue can also exhaust.
+type receiveDrainCase struct {
+	name  string
+	side  string // "server" or "client"
+	items []int
+}
+
+// receiveDrainCases returns the queues the card names: a skip in the middle, a
+// run of empty datagrams, a queue past the server cap, and a queue that ends
+// with would-block, on both the server and the client side.
+func receiveDrainCases() []receiveDrainCase {
+	junk := 4 // any positive length stands for an unauthenticated junk datagram
+
+	capPlusTen := make([]int, 0, serverMaxReceivePackets+11)
+	for i := 0; i < serverMaxReceivePackets+10; i++ {
+		capPlusTen = append(capPlusTen, junk)
+	}
+	capPlusTen = append(capPlusTen, -2)
+
+	clientCapPlusTen := make([]int, 0, clientMaxReceivePackets+11)
+	for i := 0; i < clientMaxReceivePackets+10; i++ {
+		clientCapPlusTen = append(clientCapPlusTen, junk)
+	}
+	clientCapPlusTen = append(clientCapPlusTen, -2)
+
+	return []receiveDrainCase{
+		{"junk empty junk junk", "server", []int{junk, -1, junk, junk, -2}},
+		{"empty empty empty junk", "server", []int{-1, -1, -1, junk, -2}},
+		{"cap-plus-ten junk", "server", capPlusTen},
+		{"junk junk wouldblock", "server", []int{junk, junk, -2}},
+		{"junk empty junk junk", "client", []int{junk, -1, junk, junk, -2}},
+		{"empty empty empty junk", "client", []int{-1, -1, -1, junk, -2}},
+		{"cap-plus-ten junk", "client", clientCapPlusTen},
+		{"junk junk wouldblock", "client", []int{junk, junk, -2}},
+	}
+}
+
+// receiveDrainTranscript drives the port with the override for each case and
+// prints one line per case in the oracle's form. consumed counts every datagram
+// the override handed out (including skips); processed counts the datagrams
+// that reached the packet processor.
+func receiveDrainTranscript(cases []receiveDrainCase) string {
+	var out strings.Builder
+	for _, c := range cases {
+		consumed := 0
+		processed := 0
+		index := 0
+		var calls int
+
+		override := func() ([]byte, Address, int) {
+			calls++
+			if index >= len(c.items) {
+				return nil, Address{}, 0
+			}
+			item := c.items[index]
+			index++
+			switch {
+			case item == -2:
+				return nil, Address{}, 0
+			case item < 0:
+				consumed++
+				return nil, Address{}, -1
+			default:
+				consumed++
+				processed++
+				return bytes.Repeat([]byte{0x11}, item), Address{}, item
+			}
+		}
+		_ = calls
+
+		if c.side == "server" {
+			server, err := NewServer("127.0.0.1:40000", &ServerConfig{
+				ProtocolID:             testProtocolID,
+				PrivateKey:             testPrivateKey,
+				OverrideSendAndReceive: true,
+				ReceivePacketOverride:  override,
+			}, 0)
+			if err != nil {
+				continue
+			}
+			server.Start(1)
+			server.Update(1.0)
+			server.Close()
+		} else {
+			client, err := NewClient("127.0.0.1:41000", &ClientConfig{
+				OverrideSendAndReceive: true,
+				ReceivePacketOverride:  override,
+			}, 0)
+			if err != nil {
+				continue
+			}
+			client.Update(1.0)
+			client.Close()
+		}
+
+		fmt.Fprintf(&out, "%s %s consumed %d processed %d\n", c.name, c.side, consumed, processed)
+	}
+	return out.String()
+}
+
+// writeReceiveDrainInputs writes the framed input file the oracle's "receive"
+// mode reads: a uint32 case count, then per case a side (0 server, 1 client), a
+// uint32 item count, then that many signed int32 items.
+func writeReceiveDrainInputs(t *testing.T, path string, cases []receiveDrainCase) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	writeU32 := func(v uint32) {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], v)
+		buf.Write(b[:])
+	}
+	writeI32 := func(v int32) {
+		writeU32(uint32(v))
+	}
+
+	writeU32(uint32(len(cases)))
+	for _, c := range cases {
+		writeU32(uint32(len(c.name)))
+		buf.WriteString(c.name)
+		if c.side == "client" {
+			writeU32(1)
+		} else {
+			writeU32(0)
+		}
+		writeU32(uint32(len(c.items)))
+		for _, item := range c.items {
+			writeI32(int32(item))
+		}
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("failed to write receive drain inputs: %v", err)
+	}
+}
+
+// TestCDifferentialReceiveDrain compares the port's per-update receive drain
+// against the C reference on the same scripted queues. Each side prints
+//
+//	<queue> <server|client> consumed <n> processed <m>
+//
+// and the test compares the transcripts byte for byte. It is a functional test
+// on fixed bytes with no socket and no clock, gated on NETCODE_C_DIR so the
+// hermetic unit gate skips it. Run with:
+//
+//	NETCODE_C_DIR=<checkout> go test -count=1 -run TestCDifferentialReceiveDrain .
+func TestCDifferentialReceiveDrain(t *testing.T) {
+	cDir := os.Getenv("NETCODE_C_DIR")
+	if cDir == "" {
+		t.Skip("set NETCODE_C_DIR to a C reference checkout (mas-bandwidth/netcode, branch sprint/netcode-audit-fixes at or after 7cd5f513) to run the receive drain differential test")
+	}
+	if _, err := os.Stat(filepath.Join(cDir, "netcode.c")); err != nil {
+		t.Fatalf("NETCODE_C_DIR does not contain netcode.c: %v", err)
+	}
+
+	tmp := t.TempDir()
+	oracleBin := filepath.Join(tmp, "oracle")
+	oracleSrc := filepath.Join("testdata", "c", "oracle.c")
+	sodiumSrc := filepath.Join(cDir, "sodium", "sodium.c")
+
+	build := exec.Command("cc", "-O2", "-ffp-contract=off",
+		"-I", cDir, "-I", filepath.Join(cDir, "sodium"),
+		"-o", oracleBin, oracleSrc, sodiumSrc, "-lm")
+	var buildOut bytes.Buffer
+	build.Stdout = &buildOut
+	build.Stderr = &buildOut
+	if err := build.Run(); err != nil {
+		t.Fatalf("failed to build oracle: %v\n%s", err, buildOut.String())
+	}
+
+	cases := receiveDrainCases()
+	inputFile := filepath.Join(tmp, "receive_inputs.bin")
+	writeReceiveDrainInputs(t, inputFile, cases)
+
+	oracle := exec.Command(oracleBin, "receive", inputFile)
+	var oracleOut bytes.Buffer
+	oracle.Stdout = &oracleOut
+	oracle.Stderr = &oracleOut
+	if err := oracle.Run(); err != nil {
+		t.Fatalf("oracle failed: %v\n%s", err, oracleOut.String())
+	}
+
+	cTranscript := oracleOut.String()
+	goTranscript := receiveDrainTranscript(cases)
+
+	if cTranscript == goTranscript {
+		return
+	}
+
+	cLines := strings.Split(cTranscript, "\n")
+	gLines := strings.Split(goTranscript, "\n")
+	n := len(cLines)
+	if len(gLines) < n {
+		n = len(gLines)
+	}
+	for i := 0; i < n; i++ {
+		if cLines[i] != gLines[i] {
+			t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+			break
+		}
+	}
+	t.Errorf("C and Go receive drain transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
+}

@@ -33,7 +33,13 @@ type ClientConfig struct {
 	// created.
 	OverrideSendAndReceive bool
 	SendPacketOverride     func(to *Address, packetData []byte)
-	ReceivePacketOverride  func() (packetData []byte, from Address, ok bool)
+
+	// ReceivePacketOverride returns the next datagram, mirroring the C
+	// reference receive override: a positive result is the byte count of a
+	// received datagram, 0 means nothing more was received (the queue is
+	// drained), and a negative result means skip this datagram and keep
+	// draining, for example -1 for a zero-length datagram or a receive error.
+	ReceivePacketOverride func() (packetData []byte, from Address, result int)
 }
 
 // Client is the client side of a netcode connection.
@@ -355,16 +361,21 @@ func (client *Client) ProcessPacket(from *Address, packetData []byte) {
 
 func (client *Client) receivePackets() {
 	if client.config.NetworkSimulator == nil {
-		// process packets received from socket
+		// process packets received from the socket, at most
+		// clientMaxReceivePackets datagrams per update, counting every
+		// iteration including skips
 
-		for {
+		for i := 0; i < clientMaxReceivePackets; i++ {
 			var from Address
 			var packetData []byte
 
 			if client.config.OverrideSendAndReceive {
-				data, overrideFrom, ok := client.config.ReceivePacketOverride()
-				if !ok {
+				data, overrideFrom, result := client.config.ReceivePacketOverride()
+				if result == 0 {
 					break
+				}
+				if result < 0 {
+					continue
 				}
 				from = overrideFrom
 				packetData = data
@@ -387,6 +398,10 @@ func (client *Client) receivePackets() {
 				packetData = packet.data
 			}
 
+			if len(packetData) == 0 {
+				continue
+			}
+
 			client.ProcessPacket(&from, packetData)
 		}
 	} else {
@@ -399,8 +414,6 @@ func (client *Client) receivePackets() {
 		}
 	}
 }
-
-const clientMaxReceivePackets = 64
 
 func (client *Client) sendPacketToServerInternal(p packet) {
 	var packetData [maxPacketBytes]byte

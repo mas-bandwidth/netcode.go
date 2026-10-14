@@ -69,6 +69,16 @@ const (
 	maxAddressStringLength     = 256
 	packetQueueSize            = 256
 	replayProtectionBufferSize = 256
+
+	// serverMaxReceivePackets is the most datagrams one server update reads
+	// before yielding, mirroring NETCODE_SERVER_MAX_RECEIVE_PACKETS in the C
+	// reference: 64 per client slot. It bounds how long an unauthenticated
+	// sender of junk datagrams can keep the receive loop busy.
+	serverMaxReceivePackets = 64 * MaxClients
+
+	// clientMaxReceivePackets is the same bound for one client update,
+	// mirroring NETCODE_CLIENT_MAX_RECEIVE_PACKETS.
+	clientMaxReceivePackets = 64
 )
 
 // versionInfo is written to unencrypted packet headers and mixed into the AEAD
