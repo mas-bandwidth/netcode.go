@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1552,5 +1553,152 @@ func TestPacketTagging(t *testing.T) {
 		client.Close()
 
 		server.Close()
+	}
+}
+
+// connectionResponseTokens gives the Go and C scripts the same token bytes.
+func connectionResponseTokens(t *testing.T) [3][]byte {
+	t.Helper()
+	var tokens [3][]byte
+	for i, spec := range []struct {
+		id uint64
+		user byte
+	}{{0x1111, 0xA1}, {0x2222, 0xB2}, {0x3333, 0xC3}} {
+		var err error
+		tokens[i], err = GenerateConnectToken(
+			[]string{"[::1]:40000"}, []string{"[::1]:40000"},
+			60, testTimeoutSeconds, spec.id, testProtocolID,
+			testPrivateKey[:], bytes.Repeat([]byte{spec.user}, UserDataBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return tokens
+}
+
+func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
+	t.Helper()
+	var tokens [3]connectToken
+	for i := range tokens {
+		if err := tokens[i].read(tokenBytes[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x, err := ParseAddress("[::1]:50000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, err := ParseAddress("[::1]:50001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type sentPacket struct {
+		to Address
+		data []byte
+	}
+	var sent []sentPacket
+	server, err := NewServer("[::1]:40000", &ServerConfig{
+		ProtocolID: testProtocolID, PrivateKey: testPrivateKey,
+		OverrideSendAndReceive: true,
+		SendPacketOverride: func(to *Address, data []byte) {
+			sent = append(sent, sentPacket{*to, bytes.Clone(data)})
+		},
+		ReceivePacketOverride: func() ([]byte, Address, int) {
+			return nil, Address{}, 0
+		},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	server.Start(4)
+	request := func(from *Address, token *connectToken) connectionChallenge {
+		p := &connectionRequest{
+			versionInfo: versionInfo,
+			protocolID: token.protocolID,
+			connectTokenExpireTimestamp: token.expireTimestamp,
+			connectTokenNonce: token.nonce,
+			connectTokenData: token.privateData,
+		}
+		var raw [maxPacketBytes]byte
+		n := writePacket(p, raw[:], 0, nil, testProtocolID)
+		server.ProcessPacket(from, raw[:n])
+		allowed := [connectionNumPackets]bool{}
+		allowed[connectionChallengePacket] = true
+		for i := len(sent)-1; i >= 0; i-- {
+			if !sent[i].to.Equal(*from) {
+				continue
+			}
+			data := bytes.Clone(sent[i].data)
+			var sequence uint64
+			p := readPacket(data, &sequence, token.serverToClientKey[:],
+				testProtocolID, 0, 0, nil, &allowed, nil)
+			if challenge, ok := p.(*connectionChallenge); ok {
+				return *challenge
+			}
+		}
+		t.Fatal("no challenge sent")
+		return connectionChallenge{}
+	}
+	response := func(from *Address, token *connectToken, sequence uint64, challenge connectionChallenge) {
+		p := &connectionResponse{
+			challengeTokenSequence: challenge.challengeTokenSequence,
+			challengeTokenData: challenge.challengeTokenData,
+		}
+		var raw [maxPacketBytes]byte
+		n := writePacket(p, raw[:], sequence, token.clientToServerKey[:], testProtocolID)
+		server.ProcessPacket(from, raw[:n])
+	}
+	var out strings.Builder
+	step := func(name string) {
+		fmt.Fprintf(&out, "%s connected", name)
+		for _, id := range []uint64{0x1111, 0x2222, 0x3333} {
+			for slot := 0; slot < server.maxClients; slot++ {
+				if server.clientConnected[slot] && server.clientID[slot] == id {
+					fmt.Fprintf(&out, " %04x", id)
+				}
+			}
+		}
+		out.WriteString(" userdata")
+		for _, id := range []uint64{0x1111, 0x2222, 0x3333} {
+			for slot := 0; slot < server.maxClients; slot++ {
+				if server.clientConnected[slot] && server.clientID[slot] == id {
+					fmt.Fprintf(&out, " %02x", server.clientUserData[slot][0])
+				}
+			}
+		}
+		out.WriteByte('\n')
+	}
+	challengeA := request(&x, &tokens[0])
+	step("request-a")
+	challengeB := request(&y, &tokens[1])
+	step("request-b")
+	response(&y, &tokens[1], 1, challengeA)
+	step("response-b-with-a")
+	response(&y, &tokens[1], 2, challengeB)
+	step("response-b-with-b")
+	challengeCFirst := request(&x, &tokens[2])
+	step("request-c-first")
+	_ = request(&x, &tokens[2])
+	step("request-c-second")
+	response(&x, &tokens[2], 1, challengeA)
+	step("response-c-with-a")
+	response(&x, &tokens[2], 2, challengeCFirst)
+	step("response-c-with-c-first")
+	return out.String()
+}
+
+func TestConnectionResponseRefusesAnotherMappingsChallenge(t *testing.T) {
+	got := connectionResponseTranscript(t, connectionResponseTokens(t))
+	want := "request-a connected userdata\n" +
+		"request-b connected userdata\n" +
+		"response-b-with-a connected userdata\n" +
+		"response-b-with-b connected 2222 userdata b2\n" +
+		"request-c-first connected 2222 userdata b2\n" +
+		"request-c-second connected 2222 userdata b2\n" +
+		"response-c-with-a connected 2222 userdata b2\n" +
+		"response-c-with-c-first connected 2222 3333 userdata b2 c3\n"
+	if got != want {
+		t.Fatalf("connection response transcript differs:\nwant:\n%s\ngot:\n%s", want, got)
 	}
 }

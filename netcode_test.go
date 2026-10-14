@@ -1316,3 +1316,38 @@ func TestServerCreate(t *testing.T) {
 		server.Close()
 	}
 }
+
+// A challenge encrypted for one connect token must authenticate with that
+// token's MAC and refuse the MAC of another connect token.
+func TestChallengeTokenBindsToItsConnectToken(t *testing.T) {
+	var token challengeToken
+	token.clientID = 0x1111
+	token.userData[0] = 0xA1
+	var encrypted [challengeTokenBytes]byte
+	token.write(encrypted[:])
+	var macA, macB [MacBytes]byte
+	macA[0] = 0xA1
+	macB[0] = 0xB2
+	var key [KeyBytes]byte
+	key[0] = 0xC3
+	const sequence = uint64(7)
+	if err := encryptChallengeToken(encrypted[:], sequence, key[:]); err != nil {
+		t.Fatal(err)
+	}
+	nonce := packetNonce(sequence)
+	wrong := encrypted
+	if err := decryptAEAD(wrong[:], challengeTokenBytes, macB[:], nonce[:], key[:]); err == nil {
+		t.Fatal("challenge decrypted against another connect token MAC")
+	}
+	right := encrypted
+	if err := decryptAEAD(right[:], challengeTokenBytes, macA[:], nonce[:], key[:]); err != nil {
+		t.Fatalf("challenge did not decrypt against its connect token MAC: %v", err)
+	}
+	var decoded challengeToken
+	if err := decoded.read(right[:]); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.clientID != token.clientID || decoded.userData != token.userData {
+		t.Fatal("decrypted challenge data changed")
+	}
+}
