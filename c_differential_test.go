@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Differential test against the C reference packet reader.
@@ -409,4 +410,100 @@ func TestCDifferentialReceiveDrain(t *testing.T) {
 		}
 	}
 	t.Errorf("C and Go receive drain transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
+}
+
+// deterministicConnectionResponseTokens makes the exact connect token bytes
+// shared by the two scripts. Every nonce, key, timestamp, identity and user
+// data byte is fixed; only the server's private challenge key is random.
+func deterministicConnectionResponseTokens(t *testing.T) [3][]byte {
+	t.Helper()
+	address, err := ParseAddress("[::1]:40000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result [3][]byte
+	for i, spec := range []struct {
+		id uint64
+		user byte
+	}{{0x1111, 0xA1}, {0x2222, 0xB2}, {0x3333, 0xC3}} {
+		private := connectTokenPrivate{
+			clientID: spec.id,
+			timeoutSeconds: testTimeoutSeconds,
+			numServerAddresses: 1,
+		}
+		private.serverAddresses[0] = address
+		for j := 0; j < KeyBytes; j++ {
+			private.clientToServerKey[j] = byte(0x10 + i*KeyBytes + j)
+			private.serverToClientKey[j] = byte(0x80 + i*KeyBytes + j)
+		}
+		for j := range private.userData {
+			private.userData[j] = spec.user
+		}
+		now := uint64(time.Now().Unix())
+		token := connectToken{
+			protocolID: testProtocolID,
+			createTimestamp: now,
+			expireTimestamp: now + 600,
+			timeoutSeconds: testTimeoutSeconds,
+			numServerAddresses: 1,
+			clientToServerKey: private.clientToServerKey,
+			serverToClientKey: private.serverToClientKey,
+		}
+		token.serverAddresses[0] = address
+		for j := range token.nonce {
+			token.nonce[j] = byte(0x40 + i*len(token.nonce) + j)
+		}
+		private.write(token.privateData[:])
+		if err := encryptConnectTokenPrivate(token.privateData[:], token.protocolID,
+			token.expireTimestamp, token.nonce[:], testPrivateKey[:]); err != nil {
+			t.Fatal(err)
+		}
+		result[i] = make([]byte, ConnectTokenBytes)
+		token.write(result[i])
+	}
+	return result
+}
+
+func TestCDifferentialConnectionResponse(t *testing.T) {
+	cDir := os.Getenv("NETCODE_C_DIR")
+	if cDir == "" {
+		t.Skip("set NETCODE_C_DIR to the C reference checkout at or after 5cc4798d to run the connection-response differential")
+	}
+	if _, err := os.Stat(filepath.Join(cDir, "netcode.c")); err != nil {
+		t.Fatalf("NETCODE_C_DIR does not contain netcode.c: %v", err)
+	}
+	tmp := t.TempDir()
+	oracleBin := filepath.Join(tmp, "oracle")
+	build := exec.Command("cc", "-O2", "-ffp-contract=off",
+		"-I", cDir, "-I", filepath.Join(cDir, "sodium"),
+		"-o", oracleBin, filepath.Join("testdata", "c", "oracle.c"),
+		filepath.Join(cDir, "sodium", "sodium.c"), "-lm")
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to build C oracle: %v\n%s", err, out)
+	}
+	tokens := deterministicConnectionResponseTokens(t)
+	inputPath := filepath.Join(tmp, "connection-tokens.bin")
+	if err := os.WriteFile(inputPath, bytes.Join(tokens[:], nil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := exec.Command(oracleBin, "challenge", inputPath)
+	cBytes, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("C oracle failed: %v\n%s", err, cBytes)
+	}
+	cTranscript := string(cBytes)
+	goTranscript := connectionResponseTranscript(t, tokens)
+	if cTranscript == goTranscript {
+		return
+	}
+	cLines := strings.Split(cTranscript, "\n")
+	gLines := strings.Split(goTranscript, "\n")
+	for i := 0; i < len(cLines) && i < len(gLines); i++ {
+		if cLines[i] != gLines[i] {
+			t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+			break
+		}
+	}
+	t.Errorf("C and Go connection-response transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
 }

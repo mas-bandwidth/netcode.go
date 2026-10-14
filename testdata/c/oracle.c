@@ -37,6 +37,7 @@
     confined to oracle_read_packet so a mismatch is a one-place fix.
 */
 
+#define NETCODE_ENABLE_TESTS 1
 #include "netcode.c"
 
 #include <stdint.h>
@@ -324,6 +325,130 @@ static int oracle_receive_main( const char * path )
     return 0;
 }
 
+static int oracle_challenge_read( struct netcode_address_t * to, uint8_t * key,
+                                  struct netcode_connection_challenge_packet_t * challenge )
+{
+    uint8_t allowed[NETCODE_CONNECTION_NUM_PACKETS] = { 0 };
+    allowed[NETCODE_CONNECTION_CHALLENGE_PACKET] = 1;
+    int found = 0;
+    for ( int i = 0; i < test_script.num_sent; i++ )
+    {
+        if ( !netcode_address_equal( &test_script.sent_to[i], to ) )
+            continue;
+        uint8_t data[NETCODE_MAX_PACKET_BYTES];
+        memcpy( data, test_script.sent_data[i], test_script.sent_bytes[i] );
+        uint64_t sequence = 0;
+        struct netcode_connection_challenge_packet_t * packet =
+            (struct netcode_connection_challenge_packet_t*) netcode_read_packet(
+                data, test_script.sent_bytes[i], &sequence, key, TEST_PROTOCOL_ID,
+                0, 0, UINT64_MAX, NULL, allowed, NULL, NULL, NULL );
+        if ( packet )
+        {
+            *challenge = *packet;
+            found = 1;
+            free( packet );
+        }
+    }
+    return found;
+}
+
+static void oracle_challenge_step( const char * name, struct netcode_server_t * server )
+{
+    const uint64_t ids[] = { 0x1111, 0x2222, 0x3333 };
+    printf( "%s connected", name );
+    for ( int i = 0; i < 3; i++ )
+        if ( test_script_find_client_by_id( server, ids[i] ) >= 0 )
+            printf( " %04llx", (unsigned long long) ids[i] );
+    printf( " userdata" );
+    for ( int i = 0; i < 3; i++ )
+    {
+        int slot = test_script_find_client_by_id( server, ids[i] );
+        if ( slot >= 0 )
+            printf( " %02x", (unsigned) ((uint8_t*) netcode_server_client_user_data( server, slot ))[0] );
+    }
+    printf( "\n" );
+}
+
+// The input is the three exact 2048-byte connect tokens also presented to Go.
+static int oracle_challenge_main( const char * path )
+{
+    FILE * f = fopen( path, "rb" );
+    if ( !f )
+        return 1;
+    uint8_t token_data[3][NETCODE_CONNECT_TOKEN_BYTES];
+    struct netcode_connect_token_t tokens[3];
+    for ( int i = 0; i < 3; i++ )
+    {
+        if ( fread( token_data[i], 1, NETCODE_CONNECT_TOKEN_BYTES, f ) != NETCODE_CONNECT_TOKEN_BYTES ||
+             netcode_read_connect_token( token_data[i], NETCODE_CONNECT_TOKEN_BYTES, &tokens[i] ) != NETCODE_OK )
+        {
+            fclose( f );
+            return 1;
+        }
+    }
+    fclose( f );
+    if ( netcode_init() != NETCODE_OK )
+        return 1;
+    memset( &test_script, 0, sizeof( test_script ) );
+    struct netcode_server_config_t config;
+    netcode_default_server_config( &config );
+    config.protocol_id = TEST_PROTOCOL_ID;
+    config.override_send_and_receive = 1;
+    config.send_packet_override = test_script_send_packet;
+    config.receive_packet_override = test_script_receive_packet;
+    memcpy( config.private_key, private_key, NETCODE_KEY_BYTES );
+    struct netcode_server_t * server = netcode_server_create( "[::1]:40000", &config, 0.0 );
+    if ( !server )
+        return 1;
+    netcode_server_start( server, 4 );
+    server->config.max_connect_token_lifetime = 600;
+    server->min_connect_token_expire_timestamp = 0;
+    struct netcode_address_t x, y;
+    if ( netcode_parse_address( "[::1]:50000", &x ) != NETCODE_OK ||
+         netcode_parse_address( "[::1]:50001", &y ) != NETCODE_OK )
+        return 1;
+    struct netcode_connection_challenge_packet_t a, b, c_first, c_second;
+    double current_time = 0.0;
+    test_script_add_connection_request( &x, &tokens[0] );
+    netcode_server_update( server, current_time );
+    if ( !oracle_challenge_read( &x, tokens[0].server_to_client_key, &a ) ) return 1;
+    oracle_challenge_step( "request-a", server );
+    current_time += 0.1;
+    test_script_add_connection_request( &y, &tokens[1] );
+    netcode_server_update( server, current_time );
+    if ( !oracle_challenge_read( &y, tokens[1].server_to_client_key, &b ) ) return 1;
+    oracle_challenge_step( "request-b", server );
+    current_time += 0.1;
+    test_script_add_connection_response( &y, 1, tokens[1].client_to_server_key, &a );
+    netcode_server_update( server, current_time );
+    oracle_challenge_step( "response-b-with-a", server );
+    current_time += 0.1;
+    test_script_add_connection_response( &y, 2, tokens[1].client_to_server_key, &b );
+    netcode_server_update( server, current_time );
+    oracle_challenge_step( "response-b-with-b", server );
+    current_time += 0.1;
+    test_script_add_connection_request( &x, &tokens[2] );
+    netcode_server_update( server, current_time );
+    if ( !oracle_challenge_read( &x, tokens[2].server_to_client_key, &c_first ) ) return 1;
+    oracle_challenge_step( "request-c-first", server );
+    current_time += 0.1;
+    test_script_add_connection_request( &x, &tokens[2] );
+    netcode_server_update( server, current_time );
+    if ( !oracle_challenge_read( &x, tokens[2].server_to_client_key, &c_second ) ) return 1;
+    oracle_challenge_step( "request-c-second", server );
+    current_time += 0.1;
+    test_script_add_connection_response( &x, 1, tokens[2].client_to_server_key, &a );
+    netcode_server_update( server, current_time );
+    oracle_challenge_step( "response-c-with-a", server );
+    current_time += 0.1;
+    test_script_add_connection_response( &x, 2, tokens[2].client_to_server_key, &c_first );
+    netcode_server_update( server, current_time );
+    oracle_challenge_step( "response-c-with-c-first", server );
+    netcode_server_destroy( server );
+    netcode_term();
+    return 0;
+}
+
 int main( int argc, char ** argv )
 {
     FILE * f;
@@ -338,6 +463,10 @@ int main( int argc, char ** argv )
     if ( argc == 3 && strcmp( argv[1], "receive" ) == 0 )
     {
         return oracle_receive_main( argv[2] );
+    }
+    if ( argc == 3 && strcmp( argv[1], "challenge" ) == 0 )
+    {
+        return oracle_challenge_main( argv[2] );
     }
 
     if ( argc != 2 )
