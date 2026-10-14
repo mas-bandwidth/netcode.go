@@ -151,6 +151,185 @@ static void oracle_setup( void )
                                             -1 );
 }
 
+/*
+    Receive drain mode.
+
+    Drives the C server or client receive loop with a scripted override that
+    plays the same queues the Go port test plays, and prints one line per case
+    in the form:
+
+        <queue> <server|client> consumed <n> processed <m>
+
+    consumed counts every datagram the override handed out, including the
+    skipped zero-length datagrams; processed counts the datagrams that reached
+    the packet processor. The override is the only observer, so the two sides
+    are compared on the port's pull behaviour, not on internal counters.
+
+    Input file (all integers little endian):
+
+        uint32 case_count
+        then, per case:
+            uint32 name_length
+            uint8  name[name_length]
+            uint32 side            // 0 = server, 1 = client
+            uint32 item_count
+            int32  item[item_count] // >0 junk length, -1 skip, -2 would-block
+
+    The server and client create/start/update/destroy calls must match the C
+    checkout named by NETCODE_C_DIR; this leg is unverified without one.
+*/
+
+#define ORACLE_RECEIVE_MAX_ITEMS 4096
+#define ORACLE_RECEIVE_MAX_NAME  128
+
+static int oracle_receive_items[ORACLE_RECEIVE_MAX_ITEMS];
+static int oracle_receive_count;
+static int oracle_receive_index;
+static int oracle_receive_consumed;
+static int oracle_receive_processed;
+
+static int oracle_receive_override( void * context, struct netcode_address_t * from,
+                                    uint8_t * packet_data, int max_packet_size )
+{
+    int item;
+
+    (void) context;
+    (void) from;
+
+    if ( oracle_receive_index >= oracle_receive_count )
+        return 0;
+
+    item = oracle_receive_items[oracle_receive_index++];
+
+    if ( item == -2 )
+        return 0;
+
+    if ( item < 0 )
+    {
+        oracle_receive_consumed++;
+        return -1;
+    }
+
+    if ( item > max_packet_size )
+        item = max_packet_size;
+
+    oracle_receive_consumed++;
+    oracle_receive_processed++;
+
+    memset( packet_data, 0x11, item );
+    return item;
+}
+
+static void oracle_receive_server( void )
+{
+    struct netcode_server_config_t config;
+    struct netcode_server_t * server;
+    uint8_t private_key[NETCODE_KEY_BYTES];
+
+    memset( &config, 0, sizeof( config ) );
+    oracle_private_key( private_key );
+    config.protocol_id = ORACLE_PROTOCOL_ID;
+    memcpy( config.private_key, private_key, NETCODE_KEY_BYTES );
+    config.override_send_and_receive = 1;
+    config.receive_packet_override = oracle_receive_override;
+
+    server = netcode_server_create( "127.0.0.1:40000", NULL,
+                                    ORACLE_PROTOCOL_ID, private_key, 0.0, &config );
+    if ( server == NULL )
+        return;
+
+    netcode_server_start( server, 1 );
+    netcode_server_update( server, 1.0 );
+    netcode_server_destroy( server );
+}
+
+static void oracle_receive_client( void )
+{
+    struct netcode_client_config_t config;
+    struct netcode_client_t * client;
+
+    memset( &config, 0, sizeof( config ) );
+    config.override_send_and_receive = 1;
+    config.receive_packet_override = oracle_receive_override;
+
+    client = netcode_client_create( "127.0.0.1:41000", &config, 0.0 );
+    if ( client == NULL )
+        return;
+
+    netcode_client_update( client, 1.0 );
+    netcode_client_destroy( client );
+}
+
+static int oracle_receive_main( const char * path )
+{
+    FILE * f;
+    uint32_t case_count, c;
+
+    f = fopen( path, "rb" );
+    if ( !f )
+    {
+        fprintf( stderr, "oracle: could not open %s\n", path );
+        return 1;
+    }
+
+    if ( netcode_init() != NETCODE_OK )
+    {
+        fprintf( stderr, "oracle: netcode_init failed\n" );
+        return 1;
+    }
+
+    case_count = read_u32( f );
+
+    for ( c = 0; c < case_count; c++ )
+    {
+        char name[ORACLE_RECEIVE_MAX_NAME + 1];
+        uint32_t name_length = read_u32( f );
+        uint32_t side, item_count, i;
+
+        if ( name_length > ORACLE_RECEIVE_MAX_NAME )
+        {
+            fprintf( stderr, "oracle: name too long\n" );
+            return 1;
+        }
+        if ( fread( name, 1, name_length, f ) != name_length )
+        {
+            fprintf( stderr, "oracle: short name\n" );
+            return 1;
+        }
+        name[name_length] = '\0';
+
+        side = read_u32( f );
+        item_count = read_u32( f );
+        if ( item_count > ORACLE_RECEIVE_MAX_ITEMS )
+        {
+            fprintf( stderr, "oracle: too many items\n" );
+            return 1;
+        }
+
+        for ( i = 0; i < item_count; i++ )
+            oracle_receive_items[i] = (int) read_u32( f );
+
+        oracle_receive_count = (int) item_count;
+        oracle_receive_index = 0;
+        oracle_receive_consumed = 0;
+        oracle_receive_processed = 0;
+
+        if ( side == 1 )
+            oracle_receive_client();
+        else
+            oracle_receive_server();
+
+        printf( "%s %s consumed %d processed %d\n", name,
+                side == 1 ? "client" : "server",
+                oracle_receive_consumed, oracle_receive_processed );
+    }
+
+    fclose( f );
+    netcode_term();
+
+    return 0;
+}
+
 int main( int argc, char ** argv )
 {
     FILE * f;
@@ -160,9 +339,16 @@ int main( int argc, char ** argv )
     int group_seen[ORACLE_MAX_GROUPS];
     uint8_t private_key[NETCODE_KEY_BYTES];
 
+    /* receive mode: drive the C server/client receive loops with a scripted
+       override transcript. See oracle_receive_main below. */
+    if ( argc == 3 && strcmp( argv[1], "receive" ) == 0 )
+    {
+        return oracle_receive_main( argv[2] );
+    }
+
     if ( argc != 2 )
     {
-        fprintf( stderr, "usage: %s inputs.bin\n", argv[0] );
+        fprintf( stderr, "usage: %s [receive] inputs.bin\n", argv[0] );
         return 1;
     }
 
