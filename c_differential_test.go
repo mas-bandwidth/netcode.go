@@ -485,13 +485,27 @@ func TestCDifferentialConnectionResponse(t *testing.T) {
 	if err := os.WriteFile(inputPath, bytes.Join(tokens[:], nil), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	run := exec.Command(oracleBin, "challenge", inputPath)
+	cTracePath := filepath.Join(tmp, "c-inputs.bin")
+	run := exec.Command(oracleBin, "challenge", inputPath, cTracePath)
 	cBytes, err := run.CombinedOutput()
 	if err != nil {
 		t.Fatalf("C oracle failed: %v\n%s", err, cBytes)
 	}
 	cTranscript := string(cBytes)
-	goTranscript := connectionResponseTranscript(t, tokens)
+	var goInputs bytes.Buffer
+	goTranscript := connectionResponseTranscript(t, tokens, &goInputs)
+	cInputs, err := os.ReadFile(cTracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(cInputs, goInputs.Bytes()) {
+		first := 0
+		for first < len(cInputs) && first < goInputs.Len() && cInputs[first] == goInputs.Bytes()[first] {
+			first++
+		}
+		t.Fatalf("C and Go request/response inputs differ at byte %d (C %d bytes, Go %d bytes)",
+			first, len(cInputs), goInputs.Len())
+	}
 	if cTranscript == goTranscript {
 		return
 	}

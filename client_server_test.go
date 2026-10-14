@@ -1563,7 +1563,7 @@ func connectionResponseTokens(t *testing.T) [3][]byte {
 	return sharedConnectionResponseTokens(t)
 }
 
-func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
+func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte, inputTrace *bytes.Buffer) string {
 	t.Helper()
 	var tokens [3]connectToken
 	for i := range tokens {
@@ -1600,6 +1600,17 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
 	}
 	defer server.Close()
 	server.startAt(4, connectionResponseTimestamp-1)
+	for i := range server.challengeKey {
+		server.challengeKey[i] = byte(0xa0 + i)
+	}
+	traceInput := func(packet []byte) {
+		if inputTrace != nil {
+			var size [4]byte
+			binary.LittleEndian.PutUint32(size[:], uint32(len(packet)))
+			inputTrace.Write(size[:])
+			inputTrace.Write(packet)
+		}
+	}
 	currentTime := 0.0
 	advance := func() {
 		server.time = currentTime
@@ -1616,6 +1627,7 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
 		}
 		var raw [maxPacketBytes]byte
 		n := writePacket(p, raw[:], 0, nil, testProtocolID)
+		traceInput(raw[:n])
 		server.processPacketAt(from, raw[:n], connectionResponseTimestamp)
 		allowed := [connectionNumPackets]bool{}
 		allowed[connectionChallengePacket] = true
@@ -1642,6 +1654,7 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
 		}
 		var raw [maxPacketBytes]byte
 		n := writePacket(p, raw[:], sequence, token.clientToServerKey[:], testProtocolID)
+		traceInput(raw[:n])
 		server.processPacketAt(from, raw[:n], connectionResponseTimestamp)
 	}
 	var out strings.Builder
@@ -1684,7 +1697,7 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
 }
 
 func TestConnectionResponseRefusesAnotherMappingsChallenge(t *testing.T) {
-	got := connectionResponseTranscript(t, connectionResponseTokens(t))
+	got := connectionResponseTranscript(t, connectionResponseTokens(t), nil)
 	want := "request-a connected userdata\n" +
 		"request-b connected userdata\n" +
 		"response-b-with-a connected userdata\n" +

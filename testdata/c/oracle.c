@@ -384,7 +384,7 @@ static void oracle_challenge_step( const char * name, struct netcode_server_t * 
 }
 
 // The input is the three exact 2048-byte connect tokens also presented to Go.
-static int oracle_challenge_main( const char * path )
+static int oracle_challenge_main( const char * path, const char * trace_path )
 {
     FILE * f = fopen( path, "rb" );
     if ( !f )
@@ -415,6 +415,8 @@ static int oracle_challenge_main( const char * path )
     if ( !server )
         return 1;
     netcode_server_start( server, 4 );
+    for ( int i = 0; i < NETCODE_KEY_BYTES; i++ )
+        server->challenge_key[i] = (uint8_t) ( 0xa0 + i );
     server->config.max_connect_token_lifetime = 600;
     server->min_connect_token_expire_timestamp = 1700000000ULL + 599;
     struct netcode_address_t x, y;
@@ -458,6 +460,23 @@ static int oracle_challenge_main( const char * path )
     test_script_add_connection_response( &x, 2, tokens[2].client_to_server_key, &c_first );
     netcode_server_update( server, current_time );
     oracle_challenge_step( "response-c-with-c-first", server );
+    if ( test_script.num_packets != 8 )
+        return 1;
+    FILE * trace = fopen( trace_path, "wb" );
+    if ( !trace )
+        return 1;
+    for ( int i = 0; i < test_script.num_packets; i++ )
+    {
+        uint32_t n = (uint32_t) test_script.packet_bytes[i];
+        uint8_t size[4] = { (uint8_t) n, (uint8_t) ( n >> 8 ), (uint8_t) ( n >> 16 ), (uint8_t) ( n >> 24 ) };
+        if ( fwrite( size, 1, 4, trace ) != 4 || fwrite( test_script.packet_data[i], 1, n, trace ) != n )
+        {
+            fclose( trace );
+            return 1;
+        }
+    }
+    if ( fclose( trace ) != 0 )
+        return 1;
     netcode_server_destroy( server );
     netcode_term();
     return 0;
@@ -478,9 +497,9 @@ int main( int argc, char ** argv )
     {
         return oracle_receive_main( argv[2] );
     }
-    if ( argc == 3 && strcmp( argv[1], "challenge" ) == 0 )
+    if ( argc == 4 && strcmp( argv[1], "challenge" ) == 0 )
     {
-        return oracle_challenge_main( argv[2] );
+        return oracle_challenge_main( argv[2], argv[3] );
     }
 
     if ( argc != 2 )
