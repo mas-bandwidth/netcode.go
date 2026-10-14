@@ -37,8 +37,21 @@
     confined to oracle_read_packet so a mismatch is a one-place fix.
 */
 
+#include <time.h>
+
+// The included reference reads time(NULL) during server start and packet
+// processing. Give every step the same explicit timestamp as the Go script.
+static time_t oracle_fixed_time( time_t * result )
+{
+    const time_t fixed = (time_t) 1700000000;
+    if ( result ) *result = fixed;
+    return fixed;
+}
+
+#define time oracle_fixed_time
 #define NETCODE_ENABLE_TESTS 1
 #include "netcode.c"
+#undef time
 
 #include <stdint.h>
 #include <stdio.h>
@@ -403,7 +416,7 @@ static int oracle_challenge_main( const char * path )
         return 1;
     netcode_server_start( server, 4 );
     server->config.max_connect_token_lifetime = 600;
-    server->min_connect_token_expire_timestamp = 0;
+    server->min_connect_token_expire_timestamp = 1700000000ULL + 599;
     struct netcode_address_t x, y;
     if ( netcode_parse_address( "[::1]:50000", &x ) != NETCODE_OK ||
          netcode_parse_address( "[::1]:50001", &y ) != NETCODE_OK )

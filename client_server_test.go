@@ -1556,24 +1556,11 @@ func TestPacketTagging(t *testing.T) {
 	}
 }
 
+const connectionResponseTimestamp uint64 = 1700000000
+
 // connectionResponseTokens gives the Go and C scripts the same token bytes.
 func connectionResponseTokens(t *testing.T) [3][]byte {
-	t.Helper()
-	var tokens [3][]byte
-	for i, spec := range []struct {
-		id uint64
-		user byte
-	}{{0x1111, 0xA1}, {0x2222, 0xB2}, {0x3333, 0xC3}} {
-		var err error
-		tokens[i], err = GenerateConnectToken(
-			[]string{"[::1]:40000"}, []string{"[::1]:40000"},
-			600, testTimeoutSeconds, spec.id, testProtocolID,
-			testPrivateKey[:], bytes.Repeat([]byte{spec.user}, UserDataBytes))
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	return tokens
+	return sharedConnectionResponseTokens(t)
 }
 
 func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
@@ -1612,9 +1599,14 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
 		t.Fatal(err)
 	}
 	defer server.Close()
-	server.Start(4)
-	server.minConnectTokenExpireTimestamp = 0
+	server.startAt(4, connectionResponseTimestamp-1)
+	currentTime := 0.0
+	advance := func() {
+		server.time = currentTime
+		currentTime += 0.1
+	}
 	request := func(from *Address, token *connectToken) connectionChallenge {
+		advance()
 		p := &connectionRequest{
 			versionInfo: versionInfo,
 			protocolID: token.protocolID,
@@ -1624,7 +1616,7 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
 		}
 		var raw [maxPacketBytes]byte
 		n := writePacket(p, raw[:], 0, nil, testProtocolID)
-		server.ProcessPacket(from, raw[:n])
+		server.processPacketAt(from, raw[:n], connectionResponseTimestamp)
 		allowed := [connectionNumPackets]bool{}
 		allowed[connectionChallengePacket] = true
 		for i := len(sent)-1; i >= 0; i-- {
@@ -1643,13 +1635,14 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
 		return connectionChallenge{}
 	}
 	response := func(from *Address, token *connectToken, sequence uint64, challenge connectionChallenge) {
+		advance()
 		p := &connectionResponse{
 			challengeTokenSequence: challenge.challengeTokenSequence,
 			challengeTokenData: challenge.challengeTokenData,
 		}
 		var raw [maxPacketBytes]byte
 		n := writePacket(p, raw[:], sequence, token.clientToServerKey[:], testProtocolID)
-		server.ProcessPacket(from, raw[:n])
+		server.processPacketAt(from, raw[:n], connectionResponseTimestamp)
 	}
 	var out strings.Builder
 	step := func(name string) {

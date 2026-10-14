@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Differential test against the C reference packet reader.
@@ -412,16 +411,16 @@ func TestCDifferentialReceiveDrain(t *testing.T) {
 	t.Errorf("C and Go receive drain transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
 }
 
-// deterministicConnectionResponseTokens makes the exact connect token bytes
-// shared by the two scripts. Every nonce, key, timestamp, identity and user
-// data byte is fixed; only the server's private challenge key is random.
-func deterministicConnectionResponseTokens(t *testing.T) [3][]byte {
+// sharedConnectionResponseTokens fixes the keys, nonces, timestamp, identities
+// and user data. The exact serialized tokens are passed to both scripts.
+func sharedConnectionResponseTokens(t *testing.T) [3][]byte {
 	t.Helper()
 	address, err := ParseAddress("[::1]:40000")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var result [3][]byte
+	now := connectionResponseTimestamp
 	for i, spec := range []struct {
 		id uint64
 		user byte
@@ -439,7 +438,6 @@ func deterministicConnectionResponseTokens(t *testing.T) [3][]byte {
 		for j := range private.userData {
 			private.userData[j] = spec.user
 		}
-		now := uint64(time.Now().Unix())
 		token := connectToken{
 			protocolID: testProtocolID,
 			createTimestamp: now,
@@ -482,7 +480,7 @@ func TestCDifferentialConnectionResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to build C oracle: %v\n%s", err, out)
 	}
-	tokens := deterministicConnectionResponseTokens(t)
+	tokens := sharedConnectionResponseTokens(t)
 	inputPath := filepath.Join(tmp, "connection-tokens.bin")
 	if err := os.WriteFile(inputPath, bytes.Join(tokens[:], nil), 0o600); err != nil {
 		t.Fatal(err)

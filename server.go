@@ -247,6 +247,10 @@ func (server *Server) Close() {
 // [1,MaxClients]. If the server is already running it is stopped and
 // restarted.
 func (server *Server) Start(maxClients int) {
+	server.startAt(maxClients, uint64(time.Now().Unix()))
+}
+
+func (server *Server) startAt(maxClients int, currentTimestamp uint64) {
 	// the per-client arrays are sized MaxClients. an out of range value must not get through
 
 	if maxClients <= 0 || maxClients > MaxClients {
@@ -271,7 +275,7 @@ func (server *Server) Start(maxClients int) {
 	server.globalSequence = 1 << 63
 	server.challengeSequence = 0
 	RandomBytes(server.challengeKey[:])
-	server.minConnectTokenExpireTimestamp = uint64(time.Now().Unix()) + uint64(server.config.MaxConnectTokenLifetime)
+	server.minConnectTokenExpireTimestamp = currentTimestamp + uint64(server.config.MaxConnectTokenLifetime)
 
 	for i := 0; i < server.maxClients; i++ {
 		server.clientPacketQueue[i].clear()
@@ -472,7 +476,7 @@ func (server *Server) findClientIndexByAddress(address *Address) int {
 	return -1
 }
 
-func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest) {
+func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest, currentTimestamp uint64) {
 	var connectTokenPrivate connectTokenPrivate
 	if connectTokenPrivate.read(packet.connectTokenData[:]) != nil {
 		printf(LogLevelDebug, "server ignored connection request. failed to read connect token\n")
@@ -502,8 +506,6 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		printf(LogLevelDebug, "server ignored connection request. a client with this id is already connected\n")
 		return
 	}
-
-	currentTimestamp := uint64(time.Now().Unix())
 
 	connectTokenEntryIndex := connectTokenEntriesFindOrAdd(&server.connectTokenEntries,
 		from,
@@ -662,12 +664,12 @@ func (server *Server) processConnectionResponsePacket(from *Address, packet *con
 	server.connectClient(clientIndex, from, challengeToken.clientID, encryptionIndex, timeoutSeconds, challengeToken.userData[:])
 }
 
-func (server *Server) processPacketInternal(from *Address, p packet, sequence uint64, encryptionIndex int, clientIndex int) {
+func (server *Server) processPacketInternal(from *Address, p packet, sequence uint64, encryptionIndex int, clientIndex int, currentTimestamp uint64) {
 	switch t := p.(type) {
 	case *connectionRequest:
 		if server.flags&serverFlagIgnoreConnectionRequestPackets == 0 {
 			printf(LogLevelDebug, "server received connection request from %s\n", from.String())
-			server.processConnectionRequestPacket(from, t)
+			server.processConnectionRequestPacket(from, t, currentTimestamp)
 		}
 
 	case *connectionResponse:
@@ -710,10 +712,11 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 // ServerConfig.OverrideSendAndReceive to drive the server with your own
 // transport.
 func (server *Server) ProcessPacket(from *Address, packetData []byte) {
+	server.processPacketAt(from, packetData, uint64(time.Now().Unix()))
+}
+
+func (server *Server) processPacketAt(from *Address, packetData []byte, currentTimestamp uint64) {
 	allowedPackets := serverAllowedPackets()
-
-	currentTimestamp := uint64(time.Now().Unix())
-
 	server.readAndProcessPacket(from, packetData, currentTimestamp, &allowedPackets)
 }
 
@@ -772,7 +775,7 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 		return
 	}
 
-	server.processPacketInternal(from, packet, sequence, encryptionIndex, clientIndex)
+	server.processPacketInternal(from, packet, sequence, encryptionIndex, clientIndex, currentTimestamp)
 }
 
 func (server *Server) receivePackets() {
