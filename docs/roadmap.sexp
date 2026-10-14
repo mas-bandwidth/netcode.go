@@ -11,12 +11,22 @@
 
  :groups
  (
+  (group "github-issues" :title "Moved from GitHub issues on 2026-10-14"
+   :text "Open GitHub issues of mas-bandwidth/netcode.go, recorded here on 2026-10-14 when roadmaps became the standard for future work (Glenn, 2026-10-14). Each item names its issue; the issue is closed with a pointer here.")
+
   (group "export-netcode-go-port" :title "Moved out of the sprint on 2026-10-14: netcode-go-port"
    :text "The open cards of sprint stream netcode-go-port, moved out of the stopped sprint on 2026-10-14, one item per card. Landed cards of the stream are in git and are not listed. Each item names its card, its tier, its base branch and any pushed work to resume from.")
  )
 
  :items
  (
+  (item "issue-22" :group "github-issues" :area "netcode.go"
+   :title "VersionFull pins 1.4.3; upstream netcode is now 1.4.4"
+   :text "netcode.go pins VersionFull at 1.4.3 and CI carries a check named VersionFull matches upstream. Upstream netcode cut v1.4.4 today (strict floating-point builds, no wire change), so that check will demand the follow-up on its next run against the new upstream release."
+   :date "2026-10-14"
+   :origin "mas-bandwidth/netcode.go issue #22, opened 2026-08-26 by rowan-claude; moved here 2026-10-14"
+   :kept (:github-issue "22" :labels ""))
+
   (item "go-netcode-disconnect-callback-cannot-reenter-a-clearing-slot" :group "export-netcode-go-port" :area "netcode.go"
    :title "Go netcode disconnect callback cannot reenter a clearing slot"
    :text "disconnectClientInternal (server.go:353-380) calls ConnectDisconnectCallback at 360-362 before `server.encryptionManager.clientIndex[server.clientEncryptionIndex[clientIndex]] = -1` (375) and resetClientSlot (379)."

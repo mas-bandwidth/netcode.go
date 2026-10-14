@@ -6,7 +6,18 @@ Planned work for netcode.go. Each item below was an open sprint card, moved out 
 
 ## Contents
 
+- [Moved from GitHub issues on 2026-10-14](#moved-from-github-issues-on-2026-10-14) (1)
 - [Moved out of the sprint on 2026-10-14: netcode-go-port](#moved-out-of-the-sprint-on-2026-10-14-netcode-go-port) (6)
+
+## Moved from GitHub issues on 2026-10-14
+
+Open GitHub issues of mas-bandwidth/netcode.go, recorded here on 2026-10-14 when roadmaps became the standard for future work (Glenn, 2026-10-14). Each item names its issue; the issue is closed with a pointer here.
+
+### VersionFull pins 1.4.3; upstream netcode is now 1.4.4
+
+netcode.go pins VersionFull at 1.4.3 and CI carries a check named VersionFull matches upstream. Upstream netcode cut v1.4.4 today (strict floating-point builds, no wire change), so that check will demand the follow-up on its next run against the new upstream release.
+
+From: mas-bandwidth/netcode.go issue #22, opened 2026-08-26 by rowan-claude; moved here 2026-10-14
 
 ## Moved out of the sprint on 2026-10-14: netcode-go-port
 
