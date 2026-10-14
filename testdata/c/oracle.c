@@ -179,7 +179,7 @@ static void oracle_setup( void )
     checkout named by NETCODE_C_DIR; this leg is unverified without one.
 */
 
-#define ORACLE_RECEIVE_MAX_ITEMS 4096
+#define ORACLE_RECEIVE_MAX_ITEMS ( 64 * NETCODE_MAX_CLIENTS + 11 )
 #define ORACLE_RECEIVE_MAX_NAME  128
 
 static int oracle_receive_items[ORACLE_RECEIVE_MAX_ITEMS];
