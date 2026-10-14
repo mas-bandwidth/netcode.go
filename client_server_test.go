@@ -1009,12 +1009,12 @@ func scriptedReceive(queue [][]byte) (func() ([]byte, Address, int), *int) {
 	remaining := append([][]byte(nil), queue...)
 	calls := 0
 	return func() ([]byte, Address, int) {
-		calls++
 		if len(remaining) == 0 {
 			return nil, Address{}, 0
 		}
 		item := remaining[0]
 		remaining = remaining[1:]
+		calls++
 		if item == nil {
 			return nil, Address{}, -1
 		}
