@@ -48,7 +48,7 @@ static time_t oracle_fixed_time( time_t * result )
     return fixed;
 }
 
-#define time oracle_fixed_time
+#define time(arg) oracle_fixed_time(arg)
 #define NETCODE_ENABLE_TESTS 1
 #include "netcode.c"
 #undef time
