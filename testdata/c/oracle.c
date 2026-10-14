@@ -32,9 +32,9 @@
                                   // the same non-zero value shares one
 
     The read path reaches the file-local netcode_read_packet via
-    #include "netcode.c". Its exact signature and the replay/encryption-manager
-    setup below must match the C checkout named by NETCODE_C_DIR; the single
-    call is confined to oracle_read_packet so a mismatch is a one-place fix.
+    #include "netcode.c". Its exact signature and the replay setup below
+    must match the C checkout named by NETCODE_C_DIR; the single call is
+    confined to oracle_read_packet so a mismatch is a one-place fix.
 */
 
 #include "netcode.c"
@@ -72,12 +72,9 @@ static uint32_t read_u32( FILE * f )
     return (uint32_t) b[0] | ( (uint32_t) b[1] << 8 ) | ( (uint32_t) b[2] << 16 ) | ( (uint32_t) b[3] << 24 );
 }
 
-/*
-    The encryption manager and fixed source address the reader resolves the
-    packet key from. Set up once, before the input loop.
-*/
-static struct netcode_encryption_manager_t g_encryption_manager;
-static struct netcode_address_t g_source_address;
+#ifndef NETCODE_CONNECTION_NUM_PACKETS
+#define NETCODE_CONNECTION_NUM_PACKETS 7
+#endif
 
 /*
     Reads one input packet through the C packet reader and prints the result
@@ -90,65 +87,43 @@ static int oracle_read_packet( uint8_t * buffer, int buffer_length,
                                uint64_t * out_sequence,
                                uint8_t * out_type )
 {
-    struct netcode_packet_t packet;
+    uint8_t packet_key[NETCODE_KEY_BYTES];
+    uint8_t private_key[NETCODE_KEY_BYTES];
+    uint8_t allowed_packets[NETCODE_CONNECTION_NUM_PACKETS];
     uint64_t sequence = 0;
-    int result;
+    void * packet;
 
-    memset( &packet, 0, sizeof( packet ) );
+    oracle_packet_key( packet_key );
+    oracle_private_key( private_key );
+    memset( allowed_packets, 1, sizeof( allowed_packets ) );
 
-    /* NOTE: match this call to the checkout's netcode.c. The reference reader
-       resolves the packet key for the source address from an encryption
-       manager and reads the request packet's inner token with the server
-       private key; a single encryption mapping for a fixed address carrying
-       the fixture packet key is set up by oracle_setup below. */
-    result = netcode_read_packet( &packet,
-                                  &g_source_address,
-                                  buffer,
+    packet = netcode_read_packet( buffer,
                                   buffer_length,
-                                  &g_encryption_manager,
-                                  replay_protection,
+                                  &sequence,
+                                  packet_key,
                                   ORACLE_PROTOCOL_ID,
                                   ORACLE_CURRENT_TIMESTAMP,
-                                  &sequence,
+                                  0ULL,
+                                  private_key,
+                                  allowed_packets,
+                                  replay_protection,
                                   NULL,
                                   NULL );
 
     *out_sequence = sequence;
 
-    if ( result != NETCODE_OK )
+    if ( packet == NULL )
     {
         return 0;
     }
 
-    *out_type = packet.packet_type;
+    *out_type = (uint8_t) ( *( (int*) packet ) );
+    free( packet );
     return 1;
 }
 
 static void oracle_setup( void )
 {
-    uint8_t send_key[NETCODE_KEY_BYTES];
-    uint8_t receive_key[NETCODE_KEY_BYTES];
-
-    oracle_packet_key( send_key );
-    oracle_packet_key( receive_key );
-
-    memset( &g_source_address, 0, sizeof( g_source_address ) );
-    g_source_address.type = NETCODE_ADDRESS_IPV4;
-    g_source_address.data.ipv4[0] = 127;
-    g_source_address.data.ipv4[1] = 0;
-    g_source_address.data.ipv4[2] = 0;
-    g_source_address.data.ipv4[3] = 1;
-    g_source_address.port = 40000;
-
-    netcode_encryption_manager_reset( &g_encryption_manager, 16, NULL );
-    netcode_encryption_manager_add_mapping( &g_encryption_manager,
-                                            &g_source_address,
-                                            send_key,
-                                            receive_key,
-                                            0.0,
-                                            -1.0,
-                                            15,
-                                            -1 );
 }
 
 /*
@@ -233,8 +208,7 @@ static void oracle_receive_server( void )
     config.override_send_and_receive = 1;
     config.receive_packet_override = oracle_receive_override;
 
-    server = netcode_server_create( "127.0.0.1:40000", NULL,
-                                    ORACLE_PROTOCOL_ID, private_key, 0.0, &config );
+    server = netcode_server_create( "127.0.0.1:40000", &config, 0.0 );
     if ( server == NULL )
         return;
 
