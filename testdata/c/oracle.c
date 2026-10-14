@@ -1,0 +1,255 @@
+/*
+    C reference oracle for the differential test in c_differential_test.go.
+
+    For each fixed input fed by the Go test this program runs the C packet
+    reader and prints exactly one line, in the same form the port side prints:
+
+        <n> <packet type or refused> <sequence> <length>
+
+    where <packet type or refused> is the numeric packet type 0..6 for a packet
+    that was read, or the literal "refused"; <sequence> is the sequence number
+    the reader saw (0 when none was read); and <length> is the input byte
+    length. No sockets and no wall clock: keys, protocol id and the current
+    timestamp are fixed constants, and the inputs arrive as a framed binary
+    file.
+
+    Build (see c_differential_test.go):
+
+        cc -O2 -ffp-contract=off -I$NETCODE_C_DIR -I$NETCODE_C_DIR/sodium \
+            -o oracle testdata/c/oracle.c $NETCODE_C_DIR/sodium/sodium.c -lm
+
+    Run:
+
+        ./oracle inputs.bin
+
+    inputs.bin is written by the Go test as (all integers little endian):
+
+        uint32 count
+        then, count times:
+            uint32 length
+            uint8  data[length]
+            uint32 replay_group   // 0 = fresh replay protection;
+                                  // the same non-zero value shares one
+
+    The read path reaches the file-local netcode_read_packet via
+    #include "netcode.c". Its exact signature and the replay/encryption-manager
+    setup below must match the C checkout named by NETCODE_C_DIR; the single
+    call is confined to oracle_read_packet so a mismatch is a one-place fix.
+*/
+
+#include "netcode.c"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define ORACLE_PROTOCOL_ID       0x1122334455667788ULL
+#define ORACLE_CURRENT_TIMESTAMP 0ULL
+#define ORACLE_MAX_INPUT_BYTES   4096
+#define ORACLE_MAX_GROUPS        64
+
+static void oracle_pattern( uint8_t * data, int bytes, int multiplier, int offset )
+{
+    int i;
+    for ( i = 0; i < bytes; i++ )
+    {
+        data[i] = (uint8_t) ( i * multiplier + offset );
+    }
+}
+
+static void oracle_packet_key( uint8_t * key )  { oracle_pattern( key, NETCODE_KEY_BYTES, 7, 1 ); }
+static void oracle_private_key( uint8_t * key ) { oracle_pattern( key, NETCODE_KEY_BYTES, 11, 3 ); }
+
+static uint32_t read_u32( FILE * f )
+{
+    uint8_t b[4];
+    if ( fread( b, 1, 4, f ) != 4 )
+    {
+        fprintf( stderr, "oracle: short read\n" );
+        exit( 1 );
+    }
+    return (uint32_t) b[0] | ( (uint32_t) b[1] << 8 ) | ( (uint32_t) b[2] << 16 ) | ( (uint32_t) b[3] << 24 );
+}
+
+/*
+    The encryption manager and fixed source address the reader resolves the
+    packet key from. Set up once, before the input loop.
+*/
+static struct netcode_encryption_manager_t g_encryption_manager;
+static struct netcode_address_t g_source_address;
+
+/*
+    Reads one input packet through the C packet reader and prints the result
+    line. replay_protection must be reset before the first call for its group
+    and kept across calls that share the group. Returns 1 when the packet was
+    read, 0 when it was refused.
+*/
+static int oracle_read_packet( uint8_t * buffer, int buffer_length,
+                               struct netcode_replay_protection_t * replay_protection,
+                               uint64_t * out_sequence,
+                               uint8_t * out_type )
+{
+    struct netcode_packet_t packet;
+    uint64_t sequence = 0;
+    int result;
+
+    memset( &packet, 0, sizeof( packet ) );
+
+    /* NOTE: match this call to the checkout's netcode.c. The reference reader
+       resolves the packet key for the source address from an encryption
+       manager and reads the request packet's inner token with the server
+       private key; a single encryption mapping for a fixed address carrying
+       the fixture packet key is set up by oracle_setup below. */
+    result = netcode_read_packet( &packet,
+                                  &g_source_address,
+                                  buffer,
+                                  buffer_length,
+                                  &g_encryption_manager,
+                                  replay_protection,
+                                  ORACLE_PROTOCOL_ID,
+                                  ORACLE_CURRENT_TIMESTAMP,
+                                  &sequence,
+                                  NULL,
+                                  NULL );
+
+    *out_sequence = sequence;
+
+    if ( result != NETCODE_OK )
+    {
+        return 0;
+    }
+
+    *out_type = packet.packet_type;
+    return 1;
+}
+
+static void oracle_setup( void )
+{
+    uint8_t send_key[NETCODE_KEY_BYTES];
+    uint8_t receive_key[NETCODE_KEY_BYTES];
+
+    oracle_packet_key( send_key );
+    oracle_packet_key( receive_key );
+
+    memset( &g_source_address, 0, sizeof( g_source_address ) );
+    g_source_address.type = NETCODE_ADDRESS_IPV4;
+    g_source_address.data.ipv4[0] = 127;
+    g_source_address.data.ipv4[1] = 0;
+    g_source_address.data.ipv4[2] = 0;
+    g_source_address.data.ipv4[3] = 1;
+    g_source_address.port = 40000;
+
+    netcode_encryption_manager_reset( &g_encryption_manager, 16, NULL );
+    netcode_encryption_manager_add_mapping( &g_encryption_manager,
+                                            &g_source_address,
+                                            send_key,
+                                            receive_key,
+                                            0.0,
+                                            -1.0,
+                                            15,
+                                            -1 );
+}
+
+int main( int argc, char ** argv )
+{
+    FILE * f;
+    uint32_t count, i;
+    uint8_t * buffer;
+    struct netcode_replay_protection_t replay_protection[ORACLE_MAX_GROUPS];
+    int group_seen[ORACLE_MAX_GROUPS];
+    uint8_t private_key[NETCODE_KEY_BYTES];
+
+    if ( argc != 2 )
+    {
+        fprintf( stderr, "usage: %s inputs.bin\n", argv[0] );
+        return 1;
+    }
+
+    f = fopen( argv[1], "rb" );
+    if ( !f )
+    {
+        fprintf( stderr, "oracle: could not open %s\n", argv[1] );
+        return 1;
+    }
+
+    memset( group_seen, 0, sizeof( group_seen ) );
+    oracle_private_key( private_key );
+
+    if ( netcode_init() != NETCODE_OK )
+    {
+        fprintf( stderr, "oracle: netcode_init failed\n" );
+        return 1;
+    }
+
+    oracle_setup();
+
+    buffer = (uint8_t*) malloc( ORACLE_MAX_INPUT_BYTES );
+    if ( !buffer )
+    {
+        fprintf( stderr, "oracle: out of memory\n" );
+        return 1;
+    }
+
+    count = read_u32( f );
+
+    for ( i = 0; i < count; i++ )
+    {
+        uint32_t length = read_u32( f );
+        uint32_t group;
+        int accepted;
+        uint64_t sequence = 0;
+        uint8_t packet_type = 0;
+
+        if ( length > ORACLE_MAX_INPUT_BYTES )
+        {
+            fprintf( stderr, "oracle: input %u too large (%u)\n", i, length );
+            return 1;
+        }
+
+        if ( fread( buffer, 1, length, f ) != length )
+        {
+            fprintf( stderr, "oracle: short input %u\n", i );
+            return 1;
+        }
+
+        group = read_u32( f );
+
+        if ( group >= ORACLE_MAX_GROUPS )
+        {
+            fprintf( stderr, "oracle: replay group %u out of range\n", group );
+            return 1;
+        }
+
+        if ( group != 0 && !group_seen[group] )
+        {
+            netcode_replay_protection_reset( &replay_protection[group] );
+            group_seen[group] = 1;
+        }
+        else if ( group == 0 )
+        {
+            netcode_replay_protection_reset( &replay_protection[0] );
+        }
+
+        accepted = oracle_read_packet( buffer, (int) length,
+                                       &replay_protection[group], &sequence,
+                                       &packet_type );
+
+        if ( accepted )
+        {
+            printf( "%u %u %llu %u\n", i + 1, (unsigned) packet_type,
+                    (unsigned long long) sequence, length );
+        }
+        else
+        {
+            printf( "%u refused %llu %u\n", i + 1,
+                    (unsigned long long) sequence, length );
+        }
+    }
+
+    free( buffer );
+    fclose( f );
+    netcode_term();
+
+    return 0;
+}
