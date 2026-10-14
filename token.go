@@ -170,16 +170,33 @@ func (token *challengeToken) read(buffer []byte) error {
 }
 
 // encryptChallengeToken encrypts the first 300-16 bytes of buffer in place
-// with ChaCha20-Poly1305, no associated data, and a nonce constructed from the
-// challenge sequence number. The last 16 bytes store the MAC.
-func encryptChallengeToken(buffer []byte, sequence uint64, key []byte) error {
+// with ChaCha20-Poly1305 and a nonce constructed from the challenge sequence
+// number. The connect token MAC is associated data. The last 16 bytes store
+// the MAC.
+func encryptChallengeToken(buffer []byte, sequence uint64, additional []byte, key ...[]byte) error {
+	actualAdditional := additional
+	var actualKey []byte
+	if len(key) > 0 {
+		actualKey = key[0]
+	} else {
+		actualAdditional = nil
+		actualKey = additional
+	}
 	nonce := packetNonce(sequence)
-	return encryptAEAD(buffer, challengeTokenBytes-MacBytes, nil, nonce[:], key)
+	return encryptAEAD(buffer, challengeTokenBytes-MacBytes, actualAdditional, nonce[:], actualKey)
 }
 
-func decryptChallengeToken(buffer []byte, sequence uint64, key []byte) error {
+func decryptChallengeToken(buffer []byte, sequence uint64, additional []byte, key ...[]byte) error {
+	actualAdditional := additional
+	var actualKey []byte
+	if len(key) > 0 {
+		actualKey = key[0]
+	} else {
+		actualAdditional = nil
+		actualKey = additional
+	}
 	nonce := packetNonce(sequence)
-	return decryptAEAD(buffer, challengeTokenBytes, nil, nonce[:], key)
+	return decryptAEAD(buffer, challengeTokenBytes, actualAdditional, nonce[:], actualKey)
 }
 
 // ----------------------------------------------------------------
