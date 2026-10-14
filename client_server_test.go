@@ -1580,14 +1580,14 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte, inputTrace
 		t.Fatal(err)
 	}
 	type sentPacket struct {
-		to Address
+		to   Address
 		data []byte
 	}
 	var sent []sentPacket
 	server, err := NewServer("[::1]:40000", &ServerConfig{
 		ProtocolID: testProtocolID, PrivateKey: testPrivateKey,
 		MaxConnectTokenLifetime: 600,
-		OverrideSendAndReceive: true,
+		OverrideSendAndReceive:  true,
 		SendPacketOverride: func(to *Address, data []byte) {
 			sent = append(sent, sentPacket{*to, bytes.Clone(data)})
 		},
@@ -1619,11 +1619,11 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte, inputTrace
 	request := func(from *Address, token *connectToken) connectionChallenge {
 		advance()
 		p := &connectionRequest{
-			versionInfo: versionInfo,
-			protocolID: token.protocolID,
+			versionInfo:                 versionInfo,
+			protocolID:                  token.protocolID,
 			connectTokenExpireTimestamp: token.expireTimestamp,
-			connectTokenNonce: token.nonce,
-			connectTokenData: token.privateData,
+			connectTokenNonce:           token.nonce,
+			connectTokenData:            token.privateData,
 		}
 		var raw [maxPacketBytes]byte
 		n := writePacket(p, raw[:], 0, nil, testProtocolID)
@@ -1631,7 +1631,7 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte, inputTrace
 		server.processPacketAt(from, raw[:n], connectionResponseTimestamp)
 		allowed := [connectionNumPackets]bool{}
 		allowed[connectionChallengePacket] = true
-		for i := len(sent)-1; i >= 0; i-- {
+		for i := len(sent) - 1; i >= 0; i-- {
 			if !sent[i].to.Equal(*from) {
 				continue
 			}
@@ -1650,7 +1650,7 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte, inputTrace
 		advance()
 		p := &connectionResponse{
 			challengeTokenSequence: challenge.challengeTokenSequence,
-			challengeTokenData: challenge.challengeTokenData,
+			challengeTokenData:     challenge.challengeTokenData,
 		}
 		var raw [maxPacketBytes]byte
 		n := writePacket(p, raw[:], sequence, token.clientToServerKey[:], testProtocolID)

@@ -422,12 +422,12 @@ func sharedConnectionResponseTokens(t *testing.T) [3][]byte {
 	var result [3][]byte
 	now := connectionResponseTimestamp
 	for i, spec := range []struct {
-		id uint64
+		id   uint64
 		user byte
 	}{{0x1111, 0xA1}, {0x2222, 0xB2}, {0x3333, 0xC3}} {
 		private := connectTokenPrivate{
-			clientID: spec.id,
-			timeoutSeconds: testTimeoutSeconds,
+			clientID:           spec.id,
+			timeoutSeconds:     testTimeoutSeconds,
 			numServerAddresses: 1,
 		}
 		private.serverAddresses[0] = address
@@ -439,13 +439,13 @@ func sharedConnectionResponseTokens(t *testing.T) [3][]byte {
 			private.userData[j] = spec.user
 		}
 		token := connectToken{
-			protocolID: testProtocolID,
-			createTimestamp: now,
-			expireTimestamp: now + 600,
-			timeoutSeconds: testTimeoutSeconds,
+			protocolID:         testProtocolID,
+			createTimestamp:    now,
+			expireTimestamp:    now + 600,
+			timeoutSeconds:     testTimeoutSeconds,
 			numServerAddresses: 1,
-			clientToServerKey: private.clientToServerKey,
-			serverToClientKey: private.serverToClientKey,
+			clientToServerKey:  private.clientToServerKey,
+			serverToClientKey:  private.serverToClientKey,
 		}
 		token.serverAddresses[0] = address
 		for j := range token.nonce {
