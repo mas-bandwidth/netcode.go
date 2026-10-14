@@ -1567,7 +1567,7 @@ func connectionResponseTokens(t *testing.T) [3][]byte {
 		var err error
 		tokens[i], err = GenerateConnectToken(
 			[]string{"[::1]:40000"}, []string{"[::1]:40000"},
-			60, testTimeoutSeconds, spec.id, testProtocolID,
+			600, testTimeoutSeconds, spec.id, testProtocolID,
 			testPrivateKey[:], bytes.Repeat([]byte{spec.user}, UserDataBytes))
 		if err != nil {
 			t.Fatal(err)
@@ -1599,6 +1599,7 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
 	var sent []sentPacket
 	server, err := NewServer("[::1]:40000", &ServerConfig{
 		ProtocolID: testProtocolID, PrivateKey: testPrivateKey,
+		MaxConnectTokenLifetime: 600,
 		OverrideSendAndReceive: true,
 		SendPacketOverride: func(to *Address, data []byte) {
 			sent = append(sent, sentPacket{*to, bytes.Clone(data)})
@@ -1612,6 +1613,7 @@ func connectionResponseTranscript(t *testing.T, tokenBytes [3][]byte) string {
 	}
 	defer server.Close()
 	server.Start(4)
+	server.minConnectTokenExpireTimestamp = 0
 	request := func(from *Address, token *connectToken) connectionChallenge {
 		p := &connectionRequest{
 			versionInfo: versionInfo,
