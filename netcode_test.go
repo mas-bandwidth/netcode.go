@@ -406,11 +406,11 @@ func TestChallengeToken(t *testing.T) {
 	sequence := uint64(1000)
 	key := GenerateKey()
 
-	check(t, encryptChallengeToken(buffer[:], sequence, key) == nil)
+	check(t, encryptChallengeToken(buffer[:], sequence, nil, key) == nil)
 
 	// decrypt the buffer
 
-	check(t, decryptChallengeToken(buffer[:], sequence, key) == nil)
+	check(t, decryptChallengeToken(buffer[:], sequence, nil, key) == nil)
 
 	// read the challenge token back in
 
@@ -1331,7 +1331,7 @@ func TestChallengeTokenBindsToItsConnectToken(t *testing.T) {
 	var key [KeyBytes]byte
 	key[0] = 0xC3
 	const sequence = uint64(7)
-	if err := encryptChallengeToken(encrypted[:], sequence, key[:]); err != nil {
+	if err := encryptChallengeToken(encrypted[:], sequence, macA[:], key[:]); err != nil {
 		t.Fatal(err)
 	}
 	nonce := packetNonce(sequence)
