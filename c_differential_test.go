@@ -790,6 +790,169 @@ func TestCDifferentialOverrideCallbacks(t *testing.T) {
 	t.Errorf("C and Go override callbacks transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
 }
 
+// disconnectReentryToken builds one connect token with a fixed client id and
+// user data, minted by the port, that the C oracle and the port transcript
+// both admit.
+func disconnectReentryToken(t *testing.T) []byte {
+	t.Helper()
+	token, err := GenerateConnectToken([]string{"[::1]:40000"}, []string{"[::1]:40000"},
+		600, testTimeoutSeconds, 0xABCDEF, testProtocolID, testPrivateKey[:], []byte{0x5A})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+// disconnectReentryTranscript runs the C reference's three re-entrant
+// disconnect cases over one admitted client and prints one line per case:
+//
+//	<case> callbacks <n> saw <reason> <id> <userdata-first-byte> connected <n> mappings <n> slot <connected|clear>
+//
+// The transport is the simulator with an injected clock, so no socket is
+// opened and no wall clock is read.
+func disconnectReentryTranscript(t *testing.T, token []byte) string {
+	t.Helper()
+
+	var out strings.Builder
+
+	run := func(name string, timeout, restart bool, reenter func(*Server)) {
+		simulator := NewNetworkSimulator()
+		currentTime := 0.0
+		deltaTime := 1.0 / 10.0
+
+		var server *Server
+		callbacks := 0
+		sawReason := -1
+		var sawID uint64
+		var sawUser byte
+		var reentered bool
+
+		callback := func(clientIndex int, connected bool) {
+			if connected {
+				return
+			}
+			callbacks++
+			sawReason = server.ClientDisconnectReason(clientIndex)
+			sawID = server.ClientID(clientIndex)
+			if ud := server.ClientUserData(clientIndex); len(ud) > 0 {
+				sawUser = ud[0]
+			}
+			if !reentered {
+				reentered = true
+				reenter(server)
+			}
+		}
+
+		serverConfig := &ServerConfig{
+			ProtocolID:                testProtocolID,
+			PrivateKey:                testPrivateKey,
+			NetworkSimulator:          simulator,
+			ConnectDisconnectCallback: callback,
+		}
+		var err error
+		server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		server.Start(1)
+
+		client, err := NewClient("[::]:50000", &ClientConfig{NetworkSimulator: simulator}, currentTime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.Connect(token)
+		pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+		client.Close()
+
+		if timeout {
+			for i := 0; i < 200; i++ {
+				simulator.Update(currentTime)
+				server.Update(currentTime)
+				if !server.clientConnected[0] {
+					break
+				}
+				currentTime += deltaTime
+			}
+		} else {
+			server.DisconnectClient(0)
+		}
+
+		connected := server.NumConnectedClients()
+		mappings := server.encryptionManager.numEncryptionMappings
+
+		if restart {
+			server.Start(1)
+		}
+
+		slot := "clear"
+		if server.clientConnected[0] {
+			slot = "connected"
+		}
+
+		fmt.Fprintf(&out, "%s callbacks %d saw %d %d %d connected %d mappings %d slot %s\n",
+			name, callbacks, sawReason, sawID, sawUser, connected, mappings, slot)
+		server.Close()
+	}
+
+	run("same-client", false, false, func(s *Server) { s.DisconnectClient(0) })
+	run("stop-then-restart", false, true, func(s *Server) { s.Stop() })
+	run("timeout-stop", true, false, func(s *Server) { s.Stop() })
+
+	return out.String()
+}
+
+// TestCDifferentialDisconnect compares the port's disconnect-callback re-entry
+// behaviour against the C reference. It is a functional test on fixed bytes
+// with no socket, gated on NETCODE_C_DIR so the hermetic unit gate skips it.
+// Run with:
+//
+//	NETCODE_C_DIR=<checkout> go test -count=1 -run TestCDifferentialDisconnect .
+func TestCDifferentialDisconnect(t *testing.T) {
+	cDir := os.Getenv("NETCODE_C_DIR")
+	if cDir == "" {
+		t.Skip("set NETCODE_C_DIR to the C reference checkout (mas-bandwidth/netcode, branch sprint/netcode-audit-fixes at or after bbf9805a) to run the disconnect differential")
+	}
+	if _, err := os.Stat(filepath.Join(cDir, "netcode.c")); err != nil {
+		t.Fatalf("NETCODE_C_DIR does not contain netcode.c: %v", err)
+	}
+
+	tmp := t.TempDir()
+	oracleBin := filepath.Join(tmp, "oracle")
+	build := exec.Command("cc", "-O2", "-ffp-contract=off",
+		"-I", cDir, "-I", filepath.Join(cDir, "sodium"),
+		"-o", oracleBin, filepath.Join("testdata", "c", "oracle.c"),
+		filepath.Join(cDir, "sodium", "sodium.c"), "-lm")
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to build C oracle: %v\n%s", err, out)
+	}
+
+	token := disconnectReentryToken(t)
+	tokenPath := filepath.Join(tmp, "disconnect-token.bin")
+	if err := os.WriteFile(tokenPath, token, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cBytes, err := exec.Command(oracleBin, "disconnect", tokenPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("C oracle failed: %v\n%s", err, cBytes)
+	}
+	cTranscript := string(cBytes)
+	goTranscript := disconnectReentryTranscript(t, token)
+
+	if cTranscript != goTranscript {
+		cLines := strings.Split(cTranscript, "\n")
+		gLines := strings.Split(goTranscript, "\n")
+		for i := 0; i < len(cLines) && i < len(gLines); i++ {
+			if cLines[i] != gLines[i] {
+				t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+				break
+			}
+		}
+		t.Errorf("C and Go disconnect transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
+	}
+}
+
 // sharedConnectionResponseTokens fixes the keys, nonces, timestamp, identities
 // and user data. The exact serialized tokens are passed to both scripts.
 func sharedConnectionResponseTokens(t *testing.T) [3][]byte {

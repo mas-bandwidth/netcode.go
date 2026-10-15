@@ -735,6 +735,156 @@ static int oracle_override_main( const char * path )
     return 0;
 }
 
+/*
+    Disconnect re-entry mode.
+
+    Connects one client (the exact connect token bytes passed in from the Go
+    script) and then disconnects it so the connect/disconnect callback
+    re-enters a clearing slot, printing one line per case:
+
+        <case> callbacks <n> saw <reason> <id> <userdata-first-byte> connected <n> mappings <n> slot <connected|clear>
+
+    Three cases, in order: (A) the callback disconnects the same client, (B)
+    the callback stops the server (then the server restarts to prove the slot
+    is empty), (C) a timeout inside update whose callback stops the server. No
+    sockets and no wall clock: the override transport is scripted and time is
+    passed in. The field names must match the C checkout named by
+    NETCODE_C_DIR; this leg is unverified without one.
+*/
+
+static struct netcode_server_t * g_dc_server = NULL;
+static int g_dc_case = 0;
+static int g_dc_callbacks = 0;
+static int g_dc_saw_reason = -1;
+static uint64_t g_dc_saw_id = 0;
+static uint8_t g_dc_saw_user = 0;
+
+static void oracle_disconnect_callback( void * context, int client_index, int connected )
+{
+    (void) context;
+    if ( connected )
+        return;
+
+    g_dc_callbacks++;
+    g_dc_saw_reason = netcode_server_client_disconnect_reason( g_dc_server, client_index );
+    g_dc_saw_id = netcode_server_client_id( g_dc_server, client_index );
+    const uint8_t * user_data = (const uint8_t*) netcode_server_client_user_data( g_dc_server, client_index );
+    if ( user_data )
+        g_dc_saw_user = user_data[0];
+
+    switch ( g_dc_case )
+    {
+        case 0:
+            netcode_server_disconnect_client( g_dc_server, client_index );
+            break;
+        default:
+            netcode_server_stop( g_dc_server );
+            break;
+    }
+}
+
+static void oracle_disconnect_connect_one( struct netcode_server_t * server,
+                                           struct netcode_connect_token_t * token,
+                                           struct netcode_address_t * from )
+{
+    struct netcode_connection_challenge_packet_t challenge;
+    double current_time = 0.0;
+
+    memset( &test_script, 0, sizeof( test_script ) );
+    test_script_add_connection_request( from, token );
+    netcode_server_update( server, current_time );
+    if ( !oracle_challenge_read( from, token->server_to_client_key, &challenge ) )
+        return;
+    current_time += 0.1;
+    test_script_add_connection_response( from, 1, token->client_to_server_key, &challenge );
+    netcode_server_update( server, current_time );
+}
+
+static int oracle_disconnect_main( const char * path )
+{
+    FILE * f = fopen( path, "rb" );
+    if ( !f )
+        return 1;
+    uint8_t token_data[NETCODE_CONNECT_TOKEN_BYTES];
+    struct netcode_connect_token_t token;
+    if ( fread( token_data, 1, NETCODE_CONNECT_TOKEN_BYTES, f ) != NETCODE_CONNECT_TOKEN_BYTES ||
+         netcode_read_connect_token( token_data, NETCODE_CONNECT_TOKEN_BYTES, &token ) != NETCODE_OK )
+    {
+        fclose( f );
+        return 1;
+    }
+    fclose( f );
+
+    if ( netcode_init() != NETCODE_OK )
+        return 1;
+
+    struct netcode_address_t from;
+    if ( netcode_parse_address( "[::1]:50000", &from ) != NETCODE_OK )
+        return 1;
+
+    for ( g_dc_case = 0; g_dc_case < 3; g_dc_case++ )
+    {
+        struct netcode_server_config_t config;
+        struct netcode_server_t * server;
+
+        memset( &config, 0, sizeof( config ) );
+        netcode_default_server_config( &config );
+        config.protocol_id = TEST_PROTOCOL_ID;
+        config.override_send_and_receive = 1;
+        config.send_packet_override = test_script_send_packet;
+        config.receive_packet_override = test_script_receive_packet;
+        config.connect_disconnect_callback = oracle_disconnect_callback;
+        memcpy( config.private_key, private_key, NETCODE_KEY_BYTES );
+
+        server = netcode_server_create( "[::1]:40000", &config, 0.0 );
+        if ( !server )
+            return 1;
+        g_dc_server = server;
+
+        netcode_server_start( server, 1 );
+        server->config.max_connect_token_lifetime = 600;
+        server->min_connect_token_expire_timestamp = 1700000000ULL + 599;
+
+        g_dc_callbacks = 0;
+        g_dc_saw_reason = -1;
+        g_dc_saw_id = 0;
+        g_dc_saw_user = 0;
+
+        oracle_disconnect_connect_one( server, &token, &from );
+
+        if ( g_dc_case == 2 )
+        {
+            server->client_last_packet_receive_time[0] = -1000.0;
+            netcode_server_update( server, 1.0 );
+        }
+        else
+        {
+            netcode_server_disconnect_client( server, 0 );
+        }
+
+        const char * name = g_dc_case == 0 ? "same-client" :
+                            ( g_dc_case == 1 ? "stop-then-restart" : "timeout-stop" );
+
+        int connected = server->num_connected_clients;
+        int mappings = server->encryption_manager.num_encryption_mappings;
+
+        if ( g_dc_case == 1 )
+            netcode_server_start( server, 1 );
+
+        const char * slot = server->client_connected[0] ? "connected" : "clear";
+
+        printf( "%s callbacks %d saw %d %llu %u connected %d mappings %d slot %s\n",
+                name, g_dc_callbacks, g_dc_saw_reason, (unsigned long long) g_dc_saw_id,
+                (unsigned) g_dc_saw_user, connected, mappings, slot );
+
+        netcode_server_destroy( server );
+        g_dc_server = NULL;
+    }
+
+    netcode_term();
+    return 0;
+}
+
 int main( int argc, char ** argv )
 {
     FILE * f;
@@ -757,6 +907,10 @@ int main( int argc, char ** argv )
     if ( argc == 4 && strcmp( argv[1], "challenge" ) == 0 )
     {
         return oracle_challenge_main( argv[2], argv[3] );
+    }
+    if ( argc == 3 && strcmp( argv[1], "disconnect" ) == 0 )
+    {
+        return oracle_disconnect_main( argv[2] );
     }
     if ( argc == 2 && strcmp( argv[1], "global" ) == 0 )
     {
