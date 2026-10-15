@@ -632,6 +632,76 @@ static int oracle_lifetimes_main( void )
     return 0;
 }
 
+/*
+    Address-family mode.
+
+    Drives an IPv4-only C client through three connect tokens whose server
+    address lists are [[::1]:40000], [[::1]:40000, 127.0.0.1:40000] and
+    [127.0.0.1:40000], printing one line per token in the same form the Go port
+    side prints:
+
+        token<n> state <state> address <index|none>
+
+    No sockets and no wall clock (the client is created with the override
+    transport off but the fixed address family supplies the socket handles).
+    This leg is unverified without a C checkout (NETCODE_C_DIR) and depends on
+    the checkout's test helpers named by NETCODE_ENABLE_TESTS.
+*/
+
+static int oracle_address_family_main( void )
+{
+    static const char * token0_addrs[] = { "[::1]:40000" };
+    static const char * token1_addrs[] = { "[::1]:40000", "127.0.0.1:40000" };
+    static const char * token2_addrs[] = { "127.0.0.1:40000" };
+    struct netcode_client_config_t config;
+    struct netcode_client_t * client;
+    uint8_t token_data[NETCODE_CONNECT_TOKEN_BYTES];
+    uint8_t user_data[NETCODE_USER_DATA_BYTES];
+
+    if ( netcode_init() != NETCODE_OK )
+        return 1;
+
+    memset( &config, 0, sizeof( config ) );
+    netcode_default_client_config( &config );
+    memset( user_data, 0, sizeof( user_data ) );
+
+    /* an IPv4-only client: bound to 127.0.0.1 so it has no IPv6 socket */
+    client = netcode_client_create( "127.0.0.1:50000", &config, 0.0 );
+    if ( !client )
+        return 1;
+
+    netcode_generate_connect_token( token0_addrs, token0_addrs, 1, 30, 15,
+                                    0x1234ULL, TEST_PROTOCOL_ID, private_key,
+                                    user_data, NETCODE_USER_DATA_BYTES, token_data );
+    netcode_client_connect( client, token_data );
+    if ( netcode_client_state( client ) == NETCODE_CLIENT_STATE_INVALID_CONNECT_TOKEN )
+        printf( "token0 state %d address none\n", netcode_client_state( client ) );
+    else
+        printf( "token0 state %d address %d\n", netcode_client_state( client ), client->server_address_index );
+
+    netcode_generate_connect_token( token1_addrs, token1_addrs, 2, 30, 15,
+                                    0x1234ULL, TEST_PROTOCOL_ID, private_key,
+                                    user_data, NETCODE_USER_DATA_BYTES, token_data );
+    netcode_client_connect( client, token_data );
+    if ( netcode_client_state( client ) == NETCODE_CLIENT_STATE_INVALID_CONNECT_TOKEN )
+        printf( "token1 state %d address none\n", netcode_client_state( client ) );
+    else
+        printf( "token1 state %d address %d\n", netcode_client_state( client ), client->server_address_index );
+
+    netcode_generate_connect_token( token2_addrs, token2_addrs, 1, 30, 15,
+                                    0x1234ULL, TEST_PROTOCOL_ID, private_key,
+                                    user_data, NETCODE_USER_DATA_BYTES, token_data );
+    netcode_client_connect( client, token_data );
+    if ( netcode_client_state( client ) == NETCODE_CLIENT_STATE_INVALID_CONNECT_TOKEN )
+        printf( "token2 state %d address none\n", netcode_client_state( client ) );
+    else
+        printf( "token2 state %d address %d\n", netcode_client_state( client ), client->server_address_index );
+
+    netcode_client_destroy( client );
+    netcode_term();
+    return 0;
+}
+
 int main( int argc, char ** argv )
 {
     FILE * f;
@@ -644,6 +714,10 @@ int main( int argc, char ** argv )
     if ( argc == 2 && strcmp( argv[1], "lifetimes" ) == 0 )
     {
         return oracle_lifetimes_main();
+    }
+    if ( argc == 2 && strcmp( argv[1], "addressfamily" ) == 0 )
+    {
+        return oracle_address_family_main();
     }
     /* receive mode: drive the C server/client receive loops with a scripted
        override transcript. See oracle_receive_main below. */
