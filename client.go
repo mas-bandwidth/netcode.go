@@ -7,11 +7,12 @@ import (
 
 // Client create errors, returned from NewClient and NewClientDual.
 var (
-	ErrClientParseAddressFailed     = errors.New("netcode: failed to parse client address")
-	ErrClientParseAddress2Failed    = errors.New("netcode: failed to parse client address2")
-	ErrClientSimulatorRequiresPort  = errors.New("netcode: must bind to a specific port when using network simulator")
-	ErrClientCreateSocketIPv4Failed = errors.New("netcode: failed to create client ipv4 socket")
-	ErrClientCreateSocketIPv6Failed = errors.New("netcode: failed to create client ipv6 socket")
+	ErrClientParseAddressFailed      = errors.New("netcode: failed to parse client address")
+	ErrClientParseAddress2Failed     = errors.New("netcode: failed to parse client address2")
+	ErrClientSimulatorRequiresPort   = errors.New("netcode: must bind to a specific port when using network simulator")
+	ErrClientCreateSocketIPv4Failed  = errors.New("netcode: failed to create client ipv4 socket")
+	ErrClientCreateSocketIPv6Failed  = errors.New("netcode: failed to create client ipv6 socket")
+	ErrClientMissingOverrideCallback = errors.New("netcode: override_send_and_receive requires both send_packet_override and receive_packet_override")
 )
 
 // ClientConfig configures a Client. The zero value gives working defaults:

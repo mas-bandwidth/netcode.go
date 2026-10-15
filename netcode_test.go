@@ -1154,6 +1154,74 @@ func TestServerCreateError(t *testing.T) {
 	}()
 }
 
+func TestOverrideCallbacksRequired(t *testing.T) {
+	t.Parallel()
+
+	clientCases := []struct {
+		name    string
+		send    func(to *Address, packetData []byte)
+		receive func() (packetData []byte, from Address, result int)
+	}{
+		{"send", func(to *Address, packetData []byte) {}, nil},
+		{"receive", nil, func() ([]byte, Address, int) { return nil, Address{}, 0 }},
+		{"neither", nil, nil},
+		{"both", func(to *Address, packetData []byte) {}, func() ([]byte, Address, int) { return nil, Address{}, 0 }},
+	}
+
+	for _, c := range clientCases {
+		c := c
+		t.Run("client-"+c.name, func(t *testing.T) {
+			t.Parallel()
+			client, err := NewClient("127.0.0.1:42000", &ClientConfig{
+				OverrideSendAndReceive: true,
+				SendPacketOverride:     c.send,
+				ReceivePacketOverride:  c.receive,
+			}, 0.0)
+			if c.send != nil && c.receive != nil {
+				check(t, err == nil)
+				check(t, client != nil)
+				client.Close()
+			} else {
+				check(t, client == nil)
+				check(t, errors.Is(err, ErrClientMissingOverrideCallback))
+			}
+		})
+	}
+
+	serverCases := []struct {
+		name    string
+		send    func(to *Address, packetData []byte)
+		receive func() (packetData []byte, from Address, result int)
+	}{
+		{"send", func(to *Address, packetData []byte) {}, nil},
+		{"receive", nil, func() ([]byte, Address, int) { return nil, Address{}, 0 }},
+		{"neither", nil, nil},
+		{"both", func(to *Address, packetData []byte) {}, func() ([]byte, Address, int) { return nil, Address{}, 0 }},
+	}
+
+	for _, c := range serverCases {
+		c := c
+		t.Run("server-"+c.name, func(t *testing.T) {
+			t.Parallel()
+			server, err := NewServer("127.0.0.1:40000", &ServerConfig{
+				ProtocolID:             testProtocolID,
+				PrivateKey:             testPrivateKey,
+				OverrideSendAndReceive: true,
+				SendPacketOverride:     c.send,
+				ReceivePacketOverride:  c.receive,
+			}, 0.0)
+			if c.send != nil && c.receive != nil {
+				check(t, err == nil)
+				check(t, server != nil)
+				server.Close()
+			} else {
+				check(t, server == nil)
+				check(t, errors.Is(err, ErrServerMissingOverrideCallback))
+			}
+		})
+	}
+}
+
 func TestNetworkSimulatorDeterminism(t *testing.T) {
 	// the network simulator has its own seeded rng, so two simulators given
 	// identical inputs must drop, delay and duplicate identically

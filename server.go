@@ -9,12 +9,13 @@ import (
 // failures are reported separately from other socket errors because a port
 // already in use is the common operational failure for dedicated servers.
 var (
-	ErrServerParseAddressFailed     = errors.New("netcode: failed to parse server public address")
-	ErrServerParseAddress2Failed    = errors.New("netcode: failed to parse server public address2")
-	ErrServerCreateSocketIPv4Failed = errors.New("netcode: failed to create server ipv4 socket")
-	ErrServerCreateSocketIPv6Failed = errors.New("netcode: failed to create server ipv6 socket")
-	ErrServerBindSocketIPv4Failed   = errors.New("netcode: failed to bind server ipv4 socket")
-	ErrServerBindSocketIPv6Failed   = errors.New("netcode: failed to bind server ipv6 socket")
+	ErrServerParseAddressFailed      = errors.New("netcode: failed to parse server public address")
+	ErrServerParseAddress2Failed     = errors.New("netcode: failed to parse server public address2")
+	ErrServerCreateSocketIPv4Failed  = errors.New("netcode: failed to create server ipv4 socket")
+	ErrServerCreateSocketIPv6Failed  = errors.New("netcode: failed to create server ipv6 socket")
+	ErrServerBindSocketIPv4Failed    = errors.New("netcode: failed to bind server ipv4 socket")
+	ErrServerBindSocketIPv6Failed    = errors.New("netcode: failed to bind server ipv6 socket")
+	ErrServerMissingOverrideCallback = errors.New("netcode: override_send_and_receive requires both send_packet_override and receive_packet_override")
 )
 
 // Server flags.
