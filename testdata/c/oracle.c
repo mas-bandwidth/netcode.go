@@ -482,6 +482,149 @@ static int oracle_challenge_main( const char * path, const char * trace_path )
     return 0;
 }
 
+/*
+    Global nonce mode.
+
+    Starts two servers from fresh and restarts the first, and prints only
+    boolean properties of the global packet sequence, never the random values:
+
+        server-a >=2^63 <0|1>
+        server-b >=2^63 <0|1>
+        server-a != server-b <0|1>
+        restart >=2^63 <0|1>
+        restart != server-a <0|1>
+
+    and then a client that connects with a token, disconnects, and connects
+    with the same token bytes again, printing:
+
+        client reuse <state>
+
+    where <state> is the numeric client state (-5 = invalid connect token when
+    the reused token is refused). No sockets and no wall clock: the override
+    transport is used and the returned properties are independent of the
+    random offsets. The field names must match the C checkout named by
+    NETCODE_C_DIR; this leg is unverified without one.
+*/
+
+static struct netcode_server_t * oracle_global_server( const char * address )
+{
+    struct netcode_server_config_t config;
+    uint8_t private_key[NETCODE_KEY_BYTES];
+
+    memset( &config, 0, sizeof( config ) );
+    oracle_private_key( private_key );
+    config.protocol_id = ORACLE_PROTOCOL_ID;
+    memcpy( config.private_key, private_key, NETCODE_KEY_BYTES );
+    config.override_send_and_receive = 1;
+    config.send_packet_override = oracle_send_override;
+    config.receive_packet_override = oracle_receive_override;
+
+    return netcode_server_create( address, &config, 0.0 );
+}
+
+static int oracle_global_main( void )
+{
+    struct netcode_server_t * first;
+    struct netcode_server_t * second;
+    uint64_t a, b, restart;
+
+    if ( netcode_init() != NETCODE_OK )
+        return 1;
+
+    first  = oracle_global_server( "127.0.0.1:40000" );
+    second = oracle_global_server( "127.0.0.1:40001" );
+    if ( !first || !second )
+        return 1;
+
+    netcode_server_start( first, 1 );
+    netcode_server_start( second, 1 );
+
+    a = first->global_sequence;
+    b = second->global_sequence;
+
+    printf( "server-a >=2^63 %d\n", a >= ( 1ULL << 63 ) ? 1 : 0 );
+    printf( "server-b >=2^63 %d\n", b >= ( 1ULL << 63 ) ? 1 : 0 );
+    printf( "server-a != server-b %d\n", a != b ? 1 : 0 );
+
+    netcode_server_stop( first );
+    netcode_server_start( first, 1 );
+    restart = first->global_sequence;
+
+    printf( "restart >=2^63 %d\n", restart >= ( 1ULL << 63 ) ? 1 : 0 );
+    printf( "restart != server-a %d\n", restart != a ? 1 : 0 );
+
+    netcode_server_destroy( first );
+    netcode_server_destroy( second );
+    netcode_term();
+
+    return 0;
+}
+
+/*
+    Loopback callback mode.
+
+    Connects a loopback client and a loopback server client with the
+    send_loopback_packet_callback unset and then set, on a client and on a
+    server, printing one line per attempt:
+
+        <side> <unset|set> -> <refused|connected>
+
+    A missing send-loopback callback must be refused in every build. No sockets
+    and no wall clock: the callback is the only transport observed.
+*/
+
+struct netcode_server_t * g_loopback_server = NULL;
+
+static int oracle_loopback_main( void )
+{
+    struct netcode_server_config_t sconfig;
+    struct netcode_client_config_t cconfig;
+    struct netcode_server_t * server;
+    struct netcode_client_t * client;
+    uint8_t private_key[NETCODE_KEY_BYTES];
+
+    if ( netcode_init() != NETCODE_OK )
+        return 1;
+
+    memset( &sconfig, 0, sizeof( sconfig ) );
+    oracle_private_key( private_key );
+    sconfig.protocol_id = ORACLE_PROTOCOL_ID;
+    memcpy( sconfig.private_key, private_key, NETCODE_KEY_BYTES );
+    sconfig.override_send_and_receive = 1;
+    sconfig.send_packet_override = oracle_send_override;
+    sconfig.receive_packet_override = oracle_receive_override;
+
+    server = netcode_server_create( "127.0.0.1:40000", &sconfig, 0.0 );
+    if ( !server )
+        return 1;
+    netcode_server_start( server, 1 );
+
+    memset( &cconfig, 0, sizeof( cconfig ) );
+    client = netcode_client_create( "127.0.0.1:41000", &cconfig, 0.0 );
+    if ( !client )
+        return 1;
+
+    /* server loopback client with the callback unset then set */
+    printf( "server unset -> %s\n",
+            netcode_server_connect_loopback_client( server, 0, 0x1111, NULL ) == NETCODE_OK ? "connected" : "refused" );
+    sconfig.send_loopback_packet_callback = oracle_send_override;
+    printf( "server set -> %s\n",
+            netcode_server_connect_loopback_client( server, 0, 0x2222, NULL ) == NETCODE_OK ? "connected" : "refused" );
+
+    /* client loopback with the callback unset then set */
+    printf( "client unset -> %s\n",
+            netcode_client_connect_loopback( client, 0, 1 ) == NETCODE_OK ? "connected" : "refused" );
+    cconfig.send_loopback_packet_callback = oracle_send_override;
+    printf( "client set -> %s\n",
+            netcode_client_connect_loopback( client, 0, 1 ) == NETCODE_OK ? "connected" : "refused" );
+
+    netcode_client_destroy( client );
+    netcode_server_destroy( server );
+    netcode_term();
+
+    return 0;
+}
+
 int main( int argc, char ** argv )
 {
     FILE * f;
@@ -500,6 +643,14 @@ int main( int argc, char ** argv )
     if ( argc == 4 && strcmp( argv[1], "challenge" ) == 0 )
     {
         return oracle_challenge_main( argv[2], argv[3] );
+    }
+    if ( argc == 2 && strcmp( argv[1], "global" ) == 0 )
+    {
+        return oracle_global_main();
+    }
+    if ( argc == 2 && strcmp( argv[1], "loopback" ) == 0 )
+    {
+        return oracle_loopback_main();
     }
 
     if ( argc != 2 )

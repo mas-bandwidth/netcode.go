@@ -36,6 +36,13 @@ import (
 // The checkout must be mas-bandwidth/netcode holding the audit fixes, branch
 // sprint/netcode-audit-fixes at or after 406e8d28.
 
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 type differentialInput struct {
 	data  []byte
 	group uint32 // replay group: 0 = fresh replay protection, non-zero shares one
@@ -409,6 +416,95 @@ func TestCDifferentialReceiveDrain(t *testing.T) {
 		}
 	}
 	t.Errorf("C and Go receive drain transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
+}
+
+// globalSequenceTranscript starts two servers from fresh and restarts the
+// first, printing only boolean properties of the global packet sequence in the
+// oracle's form. The random offsets are never printed, so the transcript is
+// deterministic and must match C byte for byte.
+func globalSequenceTranscript() string {
+	newServer := func(address string) *Server {
+		server, err := NewServer(address, &ServerConfig{
+			ProtocolID:             testProtocolID,
+			PrivateKey:             testPrivateKey,
+			OverrideSendAndReceive: true,
+		}, 0.0)
+		if err != nil {
+			return nil
+		}
+		server.Start(1)
+		return server
+	}
+
+	f := newServer("127.0.0.1:40000")
+	s := newServer("127.0.0.1:40001")
+	if f == nil || s == nil {
+		return ""
+	}
+
+	a := f.globalSequence
+	b := s.globalSequence
+
+	var out strings.Builder
+	fmt.Fprintf(&out, "server-a >=2^63 %d\n", boolInt(a >= 1<<63))
+	fmt.Fprintf(&out, "server-b >=2^63 %d\n", boolInt(b >= 1<<63))
+	fmt.Fprintf(&out, "server-a != server-b %d\n", boolInt(a != b))
+
+	f.Stop()
+	f.Start(1)
+	restart := f.globalSequence
+
+	fmt.Fprintf(&out, "restart >=2^63 %d\n", boolInt(restart >= 1<<63))
+	fmt.Fprintf(&out, "restart != server-a %d\n", boolInt(restart != a))
+
+	f.Close()
+	s.Close()
+	return out.String()
+}
+
+// TestCDifferentialGlobalPackets compares the port's global packet sequence
+// seeding against the C reference's boolean properties. It is a functional
+// test gated on NETCODE_C_DIR so the hermetic unit gate skips it. Run with:
+//
+//	NETCODE_C_DIR=<checkout> go test -count=1 -run TestCDifferentialGlobalPackets .
+func TestCDifferentialGlobalPackets(t *testing.T) {
+	cDir := os.Getenv("NETCODE_C_DIR")
+	if cDir == "" {
+		t.Skip("set NETCODE_C_DIR to a C reference checkout (mas-bandwidth/netcode, branch sprint/netcode-audit-fixes at or after 1c58478d) to run the global nonce differential test")
+	}
+	if _, err := os.Stat(filepath.Join(cDir, "netcode.c")); err != nil {
+		t.Fatalf("NETCODE_C_DIR does not contain netcode.c: %v", err)
+	}
+
+	tmp := t.TempDir()
+	oracleBin := filepath.Join(tmp, "oracle")
+	build := exec.Command("cc", "-O2", "-ffp-contract=off",
+		"-I", cDir, "-I", filepath.Join(cDir, "sodium"),
+		"-o", oracleBin, filepath.Join("testdata", "c", "oracle.c"),
+		filepath.Join(cDir, "sodium", "sodium.c"), "-lm")
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to build C oracle: %v\n%s", err, out)
+	}
+
+	cBytes, err := exec.Command(oracleBin, "global").CombinedOutput()
+	if err != nil {
+		t.Fatalf("C oracle failed: %v\n%s", err, cBytes)
+	}
+	cTranscript := string(cBytes)
+	goTranscript := globalSequenceTranscript()
+
+	if cTranscript != goTranscript {
+		cLines := strings.Split(cTranscript, "\n")
+		gLines := strings.Split(goTranscript, "\n")
+		for i := 0; i < len(cLines) && i < len(gLines); i++ {
+			if cLines[i] != gLines[i] {
+				t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+				break
+			}
+		}
+		t.Errorf("C and Go global-sequence transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
+	}
 }
 
 // sharedConnectionResponseTokens fixes the keys, nonces, timestamp, identities
