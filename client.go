@@ -72,6 +72,8 @@ type Client struct {
 	challengeTokenSequence uint64
 	challengeTokenData     [challengeTokenBytes]byte
 	loopback               bool
+	lastConnectTokenMAC    [MacBytes]byte
+	hasLastConnectTokenMac bool
 }
 
 func clientCreateSocket(address *Address, config *ClientConfig) (*socket, error) {
@@ -249,6 +251,20 @@ func (client *Client) Connect(connectTokenData []byte) {
 		client.setState(ClientStateInvalidConnectToken)
 		return
 	}
+
+	// refuse a reused connect token: the private data ends with the MAC that
+	// encrypts it, and presenting the same token bytes again would restart the
+	// client sequence under the same client-to-server key, so remember the last
+	// token's MAC across disconnects and compare it here.
+	var mac [MacBytes]byte
+	copy(mac[:], client.connectToken.privateData[connectTokenPrivateBytes-MacBytes:])
+	if client.hasLastConnectTokenMac && mac == client.lastConnectTokenMAC {
+		printf(LogLevelInfo, "client refused a reused connect token\n")
+		client.setState(ClientStateInvalidConnectToken)
+		return
+	}
+	client.lastConnectTokenMAC = mac
+	client.hasLastConnectTokenMac = true
 
 	client.serverAddressIndex = 0
 	client.serverAddress = client.connectToken.serverAddresses[0]
@@ -653,6 +669,10 @@ func (client *Client) MaxClients() int {
 // server in the same process without any packets going over the network. See
 // Server.ConnectLoopbackClient for the server side.
 func (client *Client) ConnectLoopback(clientIndex int, maxClients int) {
+	if client.config.SendLoopbackPacketCallback == nil {
+		printf(LogLevelError, "error: connect loopback refused: send loopback packet callback is nil\n")
+		return
+	}
 	printf(LogLevelInfo, "client connected to server via loopback as client %d\n", clientIndex)
 	client.state = ClientStateConnected
 	client.clientIndex = clientIndex

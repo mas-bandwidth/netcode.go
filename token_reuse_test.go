@@ -47,18 +47,64 @@ func TestClientReconnectWithUsedConnectToken(t *testing.T) {
 
 	check(t, server.NumConnectedClients() == 0)
 
-	// the connect token is spent. presenting it again from the same address connects nothing:
-	// the client runs out of connection request retries instead
+	// the connect token is spent. presenting it again from the same address is
+	// refused outright: the client remembers the token's MAC and goes straight to
+	// invalid connect token without sending a connection request.
 	client.Connect(connectToken)
 
-	for client.State() > ClientStateDisconnected && client.State() != ClientStateConnected {
+	check(t, client.State() == ClientStateInvalidConnectToken)
+	check(t, server.NumConnectedClients() == 0)
+}
+
+// TestClientRefusesAReusedConnectToken pins the C fix: a client that connects
+// with a token, disconnects, and then presents the same token bytes again
+// refuses to connect and goes to INVALID_CONNECT_TOKEN, keeping the previous
+// connect token's MAC to detect the repeat.
+func TestClientRefusesAReusedConnectToken(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 0.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+	client, err := NewClient("[::1]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+	}
+	server, err := NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+
+	client.Connect(connectToken)
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+	check(t, client.State() == ClientStateConnected)
+	check(t, server.NumConnectedClients() == 1)
+
+	server.DisconnectClient(0)
+
+	for client.State() > ClientStateDisconnected {
 		simulator.Update(currentTime)
 		client.Update(currentTime)
 		server.Update(currentTime)
 		currentTime += deltaTime
 	}
 
-	check(t, client.State() == ClientStateConnectionRequestTimedOut)
+	check(t, server.NumConnectedClients() == 0)
+
+	// presenting the spent token again is refused outright, without any
+	// connection request traffic: the client remembers the token's MAC.
+	client.Connect(connectToken)
+
+	check(t, client.State() == ClientStateInvalidConnectToken)
 	check(t, server.NumConnectedClients() == 0)
 }
 

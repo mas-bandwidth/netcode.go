@@ -1274,6 +1274,53 @@ type testLoopbackContext struct {
 	numLoopbackPacketsSentToServer int
 }
 
+// TestLoopbackCallbackRequired pins the C fix: a loopback connect on either
+// side with the send-loopback callback unset is refused, and nothing is
+// queued; with the callback set it connects.
+func TestLoopbackCallbackRequired(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 0.0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+	}
+	server, err := NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(2)
+	check(t, server.Running())
+
+	// both connects with a nil send-loopback callback are refused and Nothing
+	// is queued or connected.
+	server.ConnectLoopbackClient(0, 0x1111, nil)
+	check(t, !server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 0)
+
+	loopbackClient, err := NewClient("[::]:50000", &ClientConfig{NetworkSimulator: simulator}, currentTime)
+	check(t, err == nil)
+	defer loopbackClient.Close()
+
+	loopbackClient.ConnectLoopback(0, 2)
+	check(t, !loopbackClient.Loopback())
+	check(t, loopbackClient.State() != ClientStateConnected)
+
+	// with the callback set, both connect.
+	server.config.SendLoopbackPacketCallback = func(clientIndex int, packetData []byte, packetSequence uint64) {}
+	server.ConnectLoopbackClient(0, 0x2222, nil)
+	check(t, server.ClientConnected(0))
+	check(t, server.ClientLoopback(0))
+	check(t, server.NumConnectedClients() == 1)
+
+	loopbackClient.config.SendLoopbackPacketCallback = func(clientIndex int, packetData []byte, packetSequence uint64) {}
+	loopbackClient.ConnectLoopback(0, 2)
+	check(t, loopbackClient.Loopback())
+	check(t, loopbackClient.State() == ClientStateConnected)
+}
+
 func TestLoopback(t *testing.T) {
 	var context testLoopbackContext
 
