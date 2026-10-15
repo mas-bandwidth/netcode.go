@@ -57,6 +57,8 @@ func TestGlobalSequenceDiffersBetweenServers(t *testing.T) {
 			ProtocolID:             testProtocolID,
 			PrivateKey:             testPrivateKey,
 			OverrideSendAndReceive: true,
+			SendPacketOverride:     func(*Address, []byte) {},
+			ReceivePacketOverride:  func() ([]byte, Address, int) { return nil, Address{}, 0 },
 		}, 0.0)
 		check(t, err == nil)
 		server.Start(1)

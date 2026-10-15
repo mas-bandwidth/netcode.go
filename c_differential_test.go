@@ -289,6 +289,7 @@ func receiveDrainTranscript(cases []receiveDrainCase) string {
 				ProtocolID:             testProtocolID,
 				PrivateKey:             testPrivateKey,
 				OverrideSendAndReceive: true,
+				SendPacketOverride:     func(*Address, []byte) {},
 				ReceivePacketOverride:  override,
 			}, 0)
 			if err != nil {
@@ -300,6 +301,7 @@ func receiveDrainTranscript(cases []receiveDrainCase) string {
 		} else {
 			client, err := NewClient("127.0.0.1:41000", &ClientConfig{
 				OverrideSendAndReceive: true,
+				SendPacketOverride:     func(*Address, []byte) {},
 				ReceivePacketOverride:  override,
 			}, 0)
 			if err != nil {
@@ -428,6 +430,8 @@ func globalSequenceTranscript() string {
 			ProtocolID:             testProtocolID,
 			PrivateKey:             testPrivateKey,
 			OverrideSendAndReceive: true,
+			SendPacketOverride:     func(*Address, []byte) {},
+			ReceivePacketOverride:  func() ([]byte, Address, int) { return nil, Address{}, 0 },
 		}, 0.0)
 		if err != nil {
 			return nil
@@ -518,6 +522,8 @@ func loopbackTranscript() string {
 		ProtocolID:             testProtocolID,
 		PrivateKey:             testPrivateKey,
 		OverrideSendAndReceive: true,
+		SendPacketOverride:     func(*Address, []byte) {},
+		ReceivePacketOverride:  func() ([]byte, Address, int) { return nil, Address{}, 0 },
 	}, 0.0)
 	if err != nil {
 		return ""
@@ -526,6 +532,8 @@ func loopbackTranscript() string {
 
 	client, err := NewClient("127.0.0.1:41000", &ClientConfig{
 		OverrideSendAndReceive: true,
+		SendPacketOverride:     func(*Address, []byte) {},
+		ReceivePacketOverride:  func() ([]byte, Address, int) { return nil, Address{}, 0 },
 	}, 0.0)
 	if err != nil {
 		return ""
