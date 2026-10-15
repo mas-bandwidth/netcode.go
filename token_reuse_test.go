@@ -102,8 +102,9 @@ func TestClientConnectTokenPredatesServerStart(t *testing.T) {
 	check(t, client.State() == ClientStateConnectionRequestTimedOut)
 	check(t, server.NumConnectedClients() == 0)
 
-	// a connect token with the full lifetime connects
-	validToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry+5, testTimeoutSeconds, randomUint64())
+	// a connect token with the maximum lifetime connects (a longer lifetime is
+	// refused as over-long)
+	validToken := generateTestConnectToken(t, "[::1]:40000", DefaultMaxConnectTokenLifetime, testTimeoutSeconds, randomUint64())
 
 	client.Connect(validToken)
 
@@ -273,7 +274,7 @@ func TestConnectTokenHistoryFullServerRefusal(t *testing.T) {
 	check(t, err == nil)
 	defer client.Close()
 
-	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry+10, testTimeoutSeconds, randomUint64())
+	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 	client.Connect(connectToken)
 
 	for client.State() > ClientStateDisconnected && client.State() != ClientStateConnected {

@@ -476,7 +476,21 @@ func (server *Server) findClientIndexByAddress(address *Address) int {
 	return -1
 }
 
+// connectTokenExpireTimestampExceedsLifetime reports whether expireTimestamp is
+// more than maxConnectTokenLifetime past currentTimestamp, i.e. a connect token
+// whose lifetime exceeds the maximum the backend issues. A never-expiring token
+// (expire timestamp UINT64_MAX) and an over-long one both trip this, so they are
+// refused by this check rather than passing the restart floor by accident.
+func connectTokenExpireTimestampExceedsLifetime(expireTimestamp, currentTimestamp, maxConnectTokenLifetime uint64) bool {
+	return expireTimestamp-currentTimestamp > maxConnectTokenLifetime
+}
+
 func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest, currentTimestamp uint64) {
+	if connectTokenExpireTimestampExceedsLifetime(packet.connectTokenExpireTimestamp, currentTimestamp, uint64(server.config.MaxConnectTokenLifetime)) {
+		printf(LogLevelDebug, "server ignored connection request. connect token lifetime exceeds the maximum\n")
+		return
+	}
+
 	var connectTokenPrivate connectTokenPrivate
 	if connectTokenPrivate.read(packet.connectTokenData[:]) != nil {
 		printf(LogLevelDebug, "server ignored connection request. failed to read connect token\n")
@@ -530,8 +544,12 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
-	expireTime := -1.0
-	if connectTokenPrivate.timeoutSeconds >= 0 {
+	// a pre-connect mapping gets its own bounded lifetime: a non-positive token
+	// timeout expires it after preconnectMappingSeconds instead of holding an
+	// encryption-mapping slot forever (negative) or expiring before the response
+	// can arrive (zero). Promotion to a connected client clears the expiry.
+	expireTime := server.time + preconnectMappingSeconds
+	if connectTokenPrivate.timeoutSeconds > 0 {
 		expireTime = server.time + float64(connectTokenPrivate.timeoutSeconds)
 	}
 

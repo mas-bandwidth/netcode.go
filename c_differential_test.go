@@ -714,14 +714,14 @@ func tokenLifetimeTranscript(t *testing.T) string {
 func TestTokenLifetimeTranscript(t *testing.T) {
 	got := tokenLifetimeTranscript(t)
 	want := "preconnect -1 -> 10\n" +
-		"preconnect 0 -> 10\n" +
-		"preconnect 1 -> 1\n" +
-		"preconnect 5 -> 5\n" +
-		"preconnect 30 -> 30\n" +
 		"response -1 -> connects\n" +
+		"preconnect 0 -> 10\n" +
 		"response 0 -> connects\n" +
+		"preconnect 1 -> 1\n" +
 		"response 1 -> connects\n" +
+		"preconnect 5 -> 5\n" +
 		"response 5 -> connects\n" +
+		"preconnect 30 -> 30\n" +
 		"response 30 -> connects\n" +
 		"expire uint64max -> refused\n" +
 		"expire current+2max -> refused\n" +
