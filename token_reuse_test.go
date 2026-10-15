@@ -215,7 +215,7 @@ func TestPreconnectMappingExpiresWithNonpositiveTimeout(t *testing.T) {
 			ReceivePacketOverride:  func() ([]byte, Address, int) { return nil, Address{}, 0 },
 		}, 0)
 		check(t, err == nil)
-		server.startAt(1, connectionResponseTimestamp)
+		server.startAt(1, connectionResponseTimestamp-DefaultMaxConnectTokenLifetime)
 		return server
 	}
 
@@ -235,38 +235,26 @@ func TestPreconnectMappingExpiresWithNonpositiveTimeout(t *testing.T) {
 
 	// a request with a zero timeout must still connect when its response arrives
 	// one update later, rather than expiring before the response can be sent
-	simulator := NewNetworkSimulator()
-	currentTime := 0.0
-	deltaTime := 1.0 / 10.0
+	var sent []lifetimeSentPacket
+	zeroServer := lifetimeServer(t, &sent)
+	defer zeroServer.Close()
 
-	clientConfig := &ClientConfig{NetworkSimulator: simulator}
-	client, err := NewClient("[::1]:50000", clientConfig, currentTime)
-	check(t, err == nil)
-	defer client.Close()
+	zeroRequest, clientToServerKey, serverToClientKey := lifetimeConnectToken(t, 0, tokenLifetimeTimestamp+DefaultMaxConnectTokenLifetime)
+	n = writePacket(zeroRequest, raw[:], 0, nil, testProtocolID)
+	zeroServer.time = 0.0
+	zeroServer.processPacketAt(&from, raw[:n], tokenLifetimeTimestamp)
 
-	serverConfig := &ServerConfig{
-		ProtocolID:       testProtocolID,
-		PrivateKey:       testPrivateKey,
-		NetworkSimulator: simulator,
+	challenge, ok := lifetimeFindChallenge(sent, &from, serverToClientKey)
+	check(t, ok)
+
+	zeroServer.time = 0.1
+	response := &connectionResponse{
+		challengeTokenSequence: challenge.challengeTokenSequence,
+		challengeTokenData:     challenge.challengeTokenData,
 	}
-	simServer, err := NewServer("[::1]:40000", serverConfig, currentTime)
-	check(t, err == nil)
-	defer simServer.Close()
-
-	simServer.Start(1)
-
-	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, 0, randomUint64())
-	client.Connect(connectToken)
-
-	for i := 0; i < 100 && client.State() != ClientStateConnected; i++ {
-		simulator.Update(currentTime)
-		client.Update(currentTime)
-		simServer.Update(currentTime)
-		currentTime += deltaTime
-	}
-
-	check(t, client.State() == ClientStateConnected)
-	check(t, simServer.NumConnectedClients() == 1)
+	n = writePacket(response, raw[:], 1, clientToServerKey[:], testProtocolID)
+	zeroServer.processPacketAt(&from, raw[:n], tokenLifetimeTimestamp)
+	check(t, zeroServer.NumConnectedClients() == 1)
 }
 
 func TestNeverExpiringTokenIsRefused(t *testing.T) {
