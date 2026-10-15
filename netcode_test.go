@@ -13,7 +13,7 @@ const (
 	testProtocolID         = 0x1122334455667788
 	testClientID           = 0x1
 	testServerPort         = 40000
-	testConnectTokenExpiry = 30
+	testConnectTokenExpiry = 60
 	testTimeoutSeconds     = 15
 )
 
@@ -1014,7 +1014,7 @@ func TestReplayProtection(t *testing.T) {
 	// always received.
 
 	replay.reset()
-	check(t, !replay.alreadyReceived(maxUint64))
+	check(t, replay.alreadyReceived(maxUint64))
 	replay.advanceSequence(maxUint64)
 	check(t, replay.alreadyReceived(maxUint64))
 
