@@ -86,6 +86,13 @@ static uint32_t read_u32( FILE * f )
     return (uint32_t) b[0] | ( (uint32_t) b[1] << 8 ) | ( (uint32_t) b[2] << 16 ) | ( (uint32_t) b[3] << 24 );
 }
 
+static uint64_t read_u64( FILE * f )
+{
+    uint64_t lo = read_u32( f );
+    uint64_t hi = read_u32( f );
+    return lo | ( hi << 32 );
+}
+
 #ifndef NETCODE_CONNECTION_NUM_PACKETS
 #define NETCODE_CONNECTION_NUM_PACKETS 7
 #endif
@@ -885,6 +892,114 @@ static int oracle_disconnect_main( const char * path )
     return 0;
 }
 
+/*
+    Replay and restart-floor mode.
+
+    Drives the C replay protection through a fixed sequence list, reads a
+    keep-alive with an eight-byte 0xFF sequence against a window advanced to
+    UINT64_MAX, and reads hand-built connection request bytes with expire
+    floor-1, floor and floor+1 against a floor F and a current time below F,
+    printing one line per probe:
+
+        <op> <sequence or expire> -> <0|1|accepted|refused>
+
+    The keep-alive and connection request bytes arrive in the input file (all
+    integers little endian):
+
+        uint32 keepalive_length
+        uint8  keepalive[keepalive_length]
+        then, three times:
+            uint32 request_length
+            uint8  request[request_length]
+            uint64 expire
+
+    The field names must match the C checkout named by NETCODE_C_DIR; this leg
+    is unverified without one.
+*/
+
+static void oracle_replay_probe( const char * op, uint64_t sequence, int received )
+{
+    printf( "%s %llu -> %d\n", op, (unsigned long long) sequence, received ? 1 : 0 );
+}
+
+static int oracle_replay_main( const char * path )
+{
+    const uint64_t list[] = { 0, 1, 255, 256, 257,
+                              UINT64_MAX-257, UINT64_MAX-256, UINT64_MAX-255, UINT64_MAX-1, UINT64_MAX };
+    const int n = (int)( sizeof( list ) / sizeof( list[0] ) );
+    struct netcode_replay_protection_t replay;
+    int i, j;
+
+    netcode_replay_protection_reset( &replay );
+    for ( i = 0; i < n; i++ )
+    {
+        oracle_replay_probe( "already", list[i], netcode_replay_protection_already_received( &replay, list[i] ) );
+        netcode_replay_protection_advance_sequence( &replay, list[i] );
+        oracle_replay_probe( "advance", list[i], netcode_replay_protection_already_received( &replay, list[i] ) );
+        for ( j = 0; j < i; j++ )
+            oracle_replay_probe( "reprobe", list[j], netcode_replay_protection_already_received( &replay, list[j] ) );
+    }
+
+    FILE * f = fopen( path, "rb" );
+    if ( !f )
+        return 1;
+
+    uint8_t packet_key[NETCODE_KEY_BYTES];
+    uint8_t private_key[NETCODE_KEY_BYTES];
+    uint8_t allowed[NETCODE_CONNECTION_NUM_PACKETS];
+    oracle_packet_key( packet_key );
+    oracle_private_key( private_key );
+
+    /* keep-alive with sequence UINT64_MAX against a window advanced to UINT64_MAX */
+    uint32_t ka_len = read_u32( f );
+    if ( ka_len > ORACLE_MAX_INPUT_BYTES )
+        return 1;
+    uint8_t * ka_data = (uint8_t*) malloc( ka_len );
+    if ( fread( ka_data, 1, ka_len, f ) != ka_len )
+        return 1;
+
+    netcode_replay_protection_reset( &replay );
+    netcode_replay_protection_advance_sequence( &replay, UINT64_MAX );
+    memset( allowed, 0, sizeof( allowed ) );
+    allowed[NETCODE_CONNECTION_KEEP_ALIVE_PACKET] = 1;
+    uint64_t ka_sequence = 0;
+    void * ka = netcode_read_packet( ka_data, (int) ka_len, &ka_sequence, packet_key,
+                                     ORACLE_PROTOCOL_ID, 0ULL, 0ULL, UINT64_MAX,
+                                     private_key, allowed, &replay, NULL, NULL );
+    printf( "keepalive %llu -> %s\n", (unsigned long long) ka_sequence, ka ? "accepted" : "refused" );
+    if ( ka )
+        free( ka );
+    free( ka_data );
+
+    /* connection requests with expire floor-1, floor, floor+1 against floor F */
+    const uint64_t F = 2000000000ULL;
+    const uint64_t current = F - 100;
+    memset( allowed, 0, sizeof( allowed ) );
+    allowed[NETCODE_CONNECTION_REQUEST_PACKET] = 1;
+
+    for ( i = 0; i < 3; i++ )
+    {
+        uint32_t req_len = read_u32( f );
+        uint64_t expire = read_u64( f );
+        if ( req_len > ORACLE_MAX_INPUT_BYTES )
+            return 1;
+        uint8_t * req_data = (uint8_t*) malloc( req_len );
+        if ( fread( req_data, 1, req_len, f ) != req_len )
+            return 1;
+        uint64_t sequence = 0;
+        void * req = netcode_read_packet( req_data, (int) req_len, &sequence, NULL,
+                                          ORACLE_PROTOCOL_ID, current, 0ULL, F,
+                                          private_key, allowed, NULL, NULL, NULL );
+        printf( "request %llu -> %s\n", (unsigned long long) expire, req ? "accepted" : "refused" );
+        if ( req )
+            free( req );
+        free( req_data );
+    }
+
+    fclose( f );
+    return 0;
+}
+
 int main( int argc, char ** argv )
 {
     FILE * f;
@@ -911,6 +1026,10 @@ int main( int argc, char ** argv )
     if ( argc == 3 && strcmp( argv[1], "disconnect" ) == 0 )
     {
         return oracle_disconnect_main( argv[2] );
+    }
+    if ( argc == 3 && strcmp( argv[1], "replay" ) == 0 )
+    {
+        return oracle_replay_main( argv[2] );
     }
     if ( argc == 2 && strcmp( argv[1], "global" ) == 0 )
     {
