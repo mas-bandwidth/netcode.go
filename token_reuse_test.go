@@ -24,7 +24,7 @@ func TestClientReconnectWithUsedConnectToken(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerInThePast(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -80,7 +80,7 @@ func TestClientRefusesAReusedConnectToken(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerInThePast(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -148,8 +148,12 @@ func TestClientConnectTokenPredatesServerStart(t *testing.T) {
 	check(t, client.State() == ClientStateConnectionRequestTimedOut)
 	check(t, server.NumConnectedClients() == 0)
 
+	// restart the server one maximum lifetime earlier so a full-lifetime token
+	// minted now is strictly after the server start and clears the restart floor;
 	// a connect token with the maximum lifetime connects (a longer lifetime is
 	// refused as over-long)
+	startServerInThePast(server, 1)
+
 	validToken := generateTestConnectToken(t, "[::1]:40000", DefaultMaxConnectTokenLifetime, testTimeoutSeconds, randomUint64())
 
 	client.Connect(validToken)
