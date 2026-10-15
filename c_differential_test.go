@@ -507,6 +507,99 @@ func TestCDifferentialGlobalPackets(t *testing.T) {
 	}
 }
 
+// loopbackTranscript connects a loopback client and a loopback server client
+// with the send-loopback callback unset and then set, printing one line per
+// attempt in the oracle's form. A missing callback must be refused in every
+// build, so the transcript is deterministic and must match C byte for byte.
+func loopbackTranscript() string {
+	var out strings.Builder
+
+	server, err := NewServer("127.0.0.1:40000", &ServerConfig{
+		ProtocolID:             testProtocolID,
+		PrivateKey:             testPrivateKey,
+		OverrideSendAndReceive: true,
+	}, 0.0)
+	if err != nil {
+		return ""
+	}
+	server.Start(1)
+
+	client, err := NewClient("127.0.0.1:41000", &ClientConfig{
+		OverrideSendAndReceive: true,
+	}, 0.0)
+	if err != nil {
+		return ""
+	}
+
+	server.ConnectLoopbackClient(0, 0x1111, nil)
+	fmt.Fprintf(&out, "server unset -> %s\n", refusedOrConnected(server.ClientConnected(0)))
+	server.config.SendLoopbackPacketCallback = func(int, []byte, uint64) {}
+	server.ConnectLoopbackClient(0, 0x2222, nil)
+	fmt.Fprintf(&out, "server set -> %s\n", refusedOrConnected(server.ClientConnected(0)))
+
+	client.ConnectLoopback(0, 1)
+	fmt.Fprintf(&out, "client unset -> %s\n", refusedOrConnected(client.Loopback()))
+	client.config.SendLoopbackPacketCallback = func(int, []byte, uint64) {}
+	client.ConnectLoopback(0, 1)
+	fmt.Fprintf(&out, "client set -> %s\n", refusedOrConnected(client.Loopback()))
+
+	client.Close()
+	server.Close()
+	return out.String()
+}
+
+func refusedOrConnected(connected bool) string {
+	if connected {
+		return "connected"
+	}
+	return "refused"
+}
+
+// TestCDifferentialLoopback compares the port's loopback-callback refusal
+// against the C reference. It is a functional test gated on NETCODE_C_DIR so
+// the hermetic unit gate skips it. Run with:
+//
+//	NETCODE_C_DIR=<checkout> go test -count=1 -run TestCDifferentialLoopback .
+func TestCDifferentialLoopback(t *testing.T) {
+	cDir := os.Getenv("NETCODE_C_DIR")
+	if cDir == "" {
+		t.Skip("set NETCODE_C_DIR to a C reference checkout (mas-bandwidth/netcode, branch sprint/netcode-audit-fixes at or after fbefafb2) to run the loopback callback differential test")
+	}
+	if _, err := os.Stat(filepath.Join(cDir, "netcode.c")); err != nil {
+		t.Fatalf("NETCODE_C_DIR does not contain netcode.c: %v", err)
+	}
+
+	tmp := t.TempDir()
+	oracleBin := filepath.Join(tmp, "oracle")
+	build := exec.Command("cc", "-O2", "-ffp-contract=off",
+		"-I", cDir, "-I", filepath.Join(cDir, "sodium"),
+		"-o", oracleBin, filepath.Join("testdata", "c", "oracle.c"),
+		filepath.Join(cDir, "sodium", "sodium.c"), "-lm")
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to build C oracle: %v\n%s", err, out)
+	}
+
+	cBytes, err := exec.Command(oracleBin, "loopback").CombinedOutput()
+	if err != nil {
+		t.Fatalf("C oracle failed: %v\n%s", err, cBytes)
+	}
+	cTranscript := string(cBytes)
+	goTranscript := loopbackTranscript()
+
+	if cTranscript != goTranscript {
+		cLines := strings.Split(cTranscript, "\n")
+		gLines := strings.Split(goTranscript, "\n")
+		for i := 0; i < len(cLines) && i < len(gLines); i++ {
+			if cLines[i] != gLines[i] {
+				t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+				break
+			}
+		}
+		t.Errorf("C and Go loopback transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
+	}
+}
+
 // sharedConnectionResponseTokens fixes the keys, nonces, timestamp, identities
 // and user data. The exact serialized tokens are passed to both scripts.
 func sharedConnectionResponseTokens(t *testing.T) [3][]byte {
