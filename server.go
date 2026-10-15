@@ -1072,6 +1072,11 @@ func (server *Server) ConnectLoopbackClient(clientIndex int, clientID uint64, us
 		return
 	}
 
+	if server.config.SendLoopbackPacketCallback == nil {
+		printf(LogLevelError, "error: connect loopback client refused: send loopback packet callback is nil\n")
+		return
+	}
+
 	if clientIndex < 0 || clientIndex >= server.maxClients {
 		return
 	}
