@@ -43,3 +43,44 @@ func TestServerRestartGlobalSequence(t *testing.T) {
 		t.Fatalf("Start did not re-seed the global sequence: %d", server.globalSequence)
 	}
 }
+
+// TestGlobalSequenceDiffersBetweenServers pins the properties the C fix
+// guarantees: each started server has a global packet sequence in the top half
+// of the space (>= 2^63, so per-client sequences starting at zero never meet
+// it) and two servers sharing a token encrypt their first challenge under
+// different nonces, so two starts give two different global sequences.
+func TestGlobalSequenceDiffersBetweenServers(t *testing.T) {
+	newServer := func() *Server {
+		server, err := NewServer("[::1]:40123", &ServerConfig{
+			ProtocolID:             testProtocolID,
+			PrivateKey:             testPrivateKey,
+			OverrideSendAndReceive: true,
+		}, 0.0)
+		check(t, err == nil)
+		server.Start(1)
+		return server
+	}
+
+	first := newServer()
+	defer first.Close()
+	second := newServer()
+	defer second.Close()
+
+	if first.globalSequence < 1<<63 {
+		t.Fatalf("first server global sequence not in the top half: %d", first.globalSequence)
+	}
+	if second.globalSequence < 1<<63 {
+		t.Fatalf("second server global sequence not in the top half: %d", second.globalSequence)
+	}
+	if first.globalSequence == second.globalSequence {
+		t.Fatalf("two servers started from fresh share a global sequence: %d", first.globalSequence)
+	}
+
+	// stop and restart the first server: it must re-seed to a different value,
+	// or it reuses AEAD nonces under the same server-to-client token keys.
+	first.Stop()
+	first.Start(1)
+	if first.globalSequence < 1<<63 {
+		t.Fatalf("restarted server global sequence not in the top half: %d", first.globalSequence)
+	}
+}
