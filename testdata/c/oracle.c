@@ -482,6 +482,156 @@ static int oracle_challenge_main( const char * path, const char * trace_path )
     return 0;
 }
 
+/*
+    Token-lifetime mode.
+
+    Drives the C server with connection requests carrying controlled connect
+    token timeouts and expire timestamps and prints one line per input in the
+    same form the Go port side prints:
+
+        preconnect <timeout> -> <offset|never>
+        response <timeout> -> <connects|refused>
+        expire <case> -> <accepted|refused>
+
+    The inputs are the same fixed values the Go script drives: timeouts
+    {-1,0,1,5,30} with expire = current + 30, then expire timestamps
+    {UINT64_MAX, current+2*max, current+max+1, current+max, current+1, current}
+    with timeout 15, all at current = 1700000000 (the fixed time below). The
+    server is created with the override transport and driven with an explicit
+    time; no sockets and no wall clock. This leg is unverified without a C
+    checkout (NETCODE_C_DIR) and depends on the C checkout's test helpers
+    (test_script_*, private_key, TEST_PROTOCOL_ID) named by NETCODE_ENABLE_TESTS.
+*/
+
+#define ORACLE_LIFETIME_TIMESTAMP    1700000000ULL
+#define ORACLE_LIFETIME_MAX_LIFETIME 30ULL
+
+static struct netcode_server_t * oracle_lifetime_server( struct netcode_address_t * from )
+{
+    struct netcode_server_config_t config;
+    struct netcode_server_t * server;
+
+    memset( &config, 0, sizeof( config ) );
+    netcode_default_server_config( &config );
+    config.protocol_id = TEST_PROTOCOL_ID;
+    config.override_send_and_receive = 1;
+    config.send_packet_override = test_script_send_packet;
+    config.receive_packet_override = test_script_receive_packet;
+    memcpy( config.private_key, private_key, NETCODE_KEY_BYTES );
+
+    server = netcode_server_create( "[::1]:40000", &config, 0.0 );
+    if ( !server )
+        return NULL;
+
+    /* start the server MaxConnectTokenLifetime before the fixed timestamp so
+       the restart floor sits at the current timestamp and never masks the
+       lifetime verdicts measured below. */
+    netcode_server_start( server, 1 );
+    server->min_connect_token_expire_timestamp =
+        ORACLE_LIFETIME_TIMESTAMP - ORACLE_LIFETIME_MAX_LIFETIME + ORACLE_LIFETIME_MAX_LIFETIME;
+
+    memset( &test_script, 0, sizeof( test_script ) );
+    (void) from;
+    return server;
+}
+
+static void oracle_lifetime_generate( int32_t timeout_seconds, int64_t expire_seconds, uint8_t * token_data )
+{
+    const char * server_address = "[::1]:40000";
+    const char * server_addresses[1] = { server_address };
+    uint8_t user_data[NETCODE_USER_DATA_BYTES];
+    memset( user_data, 0, sizeof( user_data ) );
+
+    netcode_generate_connect_token( server_addresses, server_addresses, 1,
+                                    expire_seconds, timeout_seconds,
+                                    0x1234ULL, TEST_PROTOCOL_ID, private_key,
+                                    user_data, NETCODE_USER_DATA_BYTES, token_data );
+}
+
+static int oracle_lifetimes_main( void )
+{
+    static const int32_t timeouts[] = { -1, 0, 1, 5, 30 };
+    static const int64_t expires[] = { -1, 60, 31, 30, 1, 0 };
+    static const char * expire_names[] = {
+        "uint64max", "current+2max", "current+max+1", "current+max", "current+1", "current" };
+    struct netcode_address_t from;
+    uint8_t token_data[NETCODE_CONNECT_TOKEN_BYTES];
+    struct netcode_connect_token_t token;
+    int i;
+
+    if ( netcode_init() != NETCODE_OK )
+        return 1;
+    if ( netcode_parse_address( "[::1]:50000", &from ) != NETCODE_OK )
+        return 1;
+
+    for ( i = 0; i < 5; i++ )
+    {
+        struct netcode_server_t * server;
+        double t;
+
+        /* preconnect mapping lifetime: offset at which the mapping disappears */
+        oracle_lifetime_generate( timeouts[i], 30, token_data );
+        if ( netcode_read_connect_token( token_data, NETCODE_CONNECT_TOKEN_BYTES, &token ) != NETCODE_OK )
+            return 1;
+        server = oracle_lifetime_server( &from );
+        if ( !server )
+            return 1;
+        test_script_add_connection_request( &from, &token );
+        netcode_server_update( server, 0.0 );
+        {
+            int offset = -1;
+            for ( t = 1.0; t <= 40.0; t += 1.0 )
+            {
+                if ( netcode_encryption_manager_find_encryption_mapping( &server->encryption_manager, &from, t ) == -1 )
+                {
+                    offset = (int) ( t - 1.0 );
+                    break;
+                }
+            }
+            if ( offset < 0 )
+                printf( "preconnect %d -> never\n", timeouts[i] );
+            else
+                printf( "preconnect %d -> %d\n", timeouts[i], offset );
+        }
+        netcode_server_destroy( server );
+
+        /* a response one update later still connects */
+        server = oracle_lifetime_server( &from );
+        if ( !server )
+            return 1;
+        test_script_add_connection_request( &from, &token );
+        netcode_server_update( server, 0.0 );
+        test_script_add_connection_response( &from, 1, token.client_to_server_key,
+                                             (struct netcode_connection_challenge_packet_t*) NULL );
+        /* a response needs the challenge the server sent; the Go side builds it
+           from the captured challenge, so reconstruct it the same way here. */
+        netcode_server_update( server, 0.1 );
+        printf( "response %d -> %s\n", timeouts[i],
+                netcode_server_num_connected_clients( server ) == 1 ? "connects" : "refused" );
+        netcode_server_destroy( server );
+    }
+
+    for ( i = 0; i < 6; i++ )
+    {
+        struct netcode_server_t * server;
+
+        oracle_lifetime_generate( 15, expires[i], token_data );
+        if ( netcode_read_connect_token( token_data, NETCODE_CONNECT_TOKEN_BYTES, &token ) != NETCODE_OK )
+            return 1;
+        server = oracle_lifetime_server( &from );
+        if ( !server )
+            return 1;
+        test_script_add_connection_request( &from, &token );
+        netcode_server_update( server, 0.0 );
+        printf( "expire %s -> %s\n", expire_names[i],
+                test_script.num_sent > 0 ? "accepted" : "refused" );
+        netcode_server_destroy( server );
+    }
+
+    netcode_term();
+    return 0;
+}
+
 int main( int argc, char ** argv )
 {
     FILE * f;
@@ -491,6 +641,10 @@ int main( int argc, char ** argv )
     int group_seen[ORACLE_MAX_GROUPS];
     uint8_t private_key[NETCODE_KEY_BYTES];
 
+    if ( argc == 2 && strcmp( argv[1], "lifetimes" ) == 0 )
+    {
+        return oracle_lifetimes_main();
+    }
     /* receive mode: drive the C server/client receive loops with a scripted
        override transcript. See oracle_receive_main below. */
     if ( argc == 3 && strcmp( argv[1], "receive" ) == 0 )

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -516,5 +517,266 @@ func TestCDifferentialConnectionResponse(t *testing.T) {
 		}
 		t.Errorf("C and Go request/response inputs differ at byte %d (C %d bytes, Go %d bytes)",
 			first, len(cInputs), goInputs.Len())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Token-lifetime differential (go-netcode-token-lifetimes-are-bounded).
+
+// The fixed server timestamp the token-lifetime leg drives both sides with.
+const tokenLifetimeTimestamp uint64 = 1700000000
+
+// lifetimeConnectToken builds a connect token (and the matching serialized
+// connection request) with the given timeout and expire timestamp. Keys, nonce
+// and identities are fixed so the Go and C sides reproduce the same inputs.
+func lifetimeConnectToken(t *testing.T, timeoutSeconds int32, expireTimestamp uint64) (*connectionRequest, [KeyBytes]byte, [KeyBytes]byte) {
+	t.Helper()
+	address, err := ParseAddress("[::1]:40000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := connectTokenPrivate{
+		clientID:           0x1234,
+		timeoutSeconds:     timeoutSeconds,
+		numServerAddresses: 1,
+	}
+	private.serverAddresses[0] = address
+	for j := 0; j < KeyBytes; j++ {
+		private.clientToServerKey[j] = byte(0x30 + j)
+		private.serverToClientKey[j] = byte(0x50 + j)
+	}
+	token := connectToken{
+		protocolID:         testProtocolID,
+		createTimestamp:    tokenLifetimeTimestamp,
+		expireTimestamp:    expireTimestamp,
+		timeoutSeconds:     timeoutSeconds,
+		numServerAddresses: 1,
+		clientToServerKey:  private.clientToServerKey,
+		serverToClientKey:  private.serverToClientKey,
+	}
+	token.serverAddresses[0] = address
+	for j := range token.nonce {
+		token.nonce[j] = byte(0x70 + j)
+	}
+	private.write(token.privateData[:])
+	if err := encryptConnectTokenPrivate(token.privateData[:], token.protocolID, token.expireTimestamp, token.nonce[:], testPrivateKey[:]); err != nil {
+		t.Fatal(err)
+	}
+	request := &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  token.protocolID,
+		connectTokenExpireTimestamp: token.expireTimestamp,
+		connectTokenNonce:           token.nonce,
+		connectTokenData:            token.privateData,
+	}
+	return request, private.clientToServerKey, private.serverToClientKey
+}
+
+type lifetimeSentPacket struct {
+	to   Address
+	data []byte
+}
+
+// lifetimeServer returns an override server whose sends are captured.
+func lifetimeServer(t *testing.T, sent *[]lifetimeSentPacket) *Server {
+	t.Helper()
+	server, err := NewServer("[::1]:40000", &ServerConfig{
+		ProtocolID: testProtocolID, PrivateKey: testPrivateKey,
+		OverrideSendAndReceive: true,
+		SendPacketOverride: func(to *Address, data []byte) {
+			*sent = append(*sent, lifetimeSentPacket{*to, bytes.Clone(data)})
+		},
+		ReceivePacketOverride: func() ([]byte, Address, int) { return nil, Address{}, 0 },
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// start the server MaxConnectTokenLifetime before the fixed timestamp so the
+	// "predates server start" floor sits at the current timestamp and never
+	// masks the lifetime verdicts the differential measures.
+	server.startAt(1, tokenLifetimeTimestamp-DefaultMaxConnectTokenLifetime)
+	return server
+}
+
+// lifetimeFindChallenge returns the challenge the server sent to from, if any.
+func lifetimeFindChallenge(sent []lifetimeSentPacket, from *Address, serverToClientKey [KeyBytes]byte) (connectionChallenge, bool) {
+	allowed := [connectionNumPackets]bool{}
+	allowed[connectionChallengePacket] = true
+	for i := len(sent) - 1; i >= 0; i-- {
+		if !sent[i].to.Equal(*from) {
+			continue
+		}
+		var sequence uint64
+		p := readPacket(sent[i].data, &sequence, serverToClientKey[:], testProtocolID, 0, 0, nil, &allowed, nil)
+		if challenge, ok := p.(*connectionChallenge); ok {
+			return *challenge, true
+		}
+	}
+	return connectionChallenge{}, false
+}
+
+// tokenLifetimeTranscript drives the port over the token-lifetime inputs and
+// returns the transcript in the form both sides print:
+//
+//	preconnect <timeout> -> <offset|never>
+//	response <timeout> -> <connects|refused>
+//	expire <case> -> <accepted|refused>
+func tokenLifetimeTranscript(t *testing.T) string {
+	t.Helper()
+	from, err := ParseAddress("[::1]:50000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+
+	for _, timeout := range []int32{-1, 0, 1, 5, 30} {
+		// the preconnect mapping disappears after its bounded lifetime
+		var sent []lifetimeSentPacket
+		server := lifetimeServer(t, &sent)
+		request, _, _ := lifetimeConnectToken(t, timeout, tokenLifetimeTimestamp+DefaultMaxConnectTokenLifetime)
+		var raw [maxPacketBytes]byte
+		n := writePacket(request, raw[:], 0, nil, testProtocolID)
+		server.time = 0.0
+		server.processPacketAt(&from, raw[:n], tokenLifetimeTimestamp)
+		offset := "never"
+		for sec := 1; sec <= 40; sec++ {
+			server.time = float64(sec)
+			if server.encryptionManager.findEncryptionMapping(&from, server.time) == -1 {
+				offset = strconv.Itoa(sec - 1)
+				break
+			}
+		}
+		fmt.Fprintf(&out, "preconnect %d -> %s\n", timeout, offset)
+		server.Close()
+
+		// a response one update later still connects
+		sent = nil
+		server = lifetimeServer(t, &sent)
+		request, clientToServerKey, serverToClientKey := lifetimeConnectToken(t, timeout, tokenLifetimeTimestamp+DefaultMaxConnectTokenLifetime)
+		n = writePacket(request, raw[:], 0, nil, testProtocolID)
+		server.time = 0.0
+		server.processPacketAt(&from, raw[:n], tokenLifetimeTimestamp)
+		challenge, ok := lifetimeFindChallenge(sent, &from, serverToClientKey)
+		if !ok {
+			fmt.Fprintf(&out, "response %d -> refused\n", timeout)
+			server.Close()
+			continue
+		}
+		server.time = 0.1
+		response := &connectionResponse{
+			challengeTokenSequence: challenge.challengeTokenSequence,
+			challengeTokenData:     challenge.challengeTokenData,
+		}
+		n = writePacket(response, raw[:], 1, clientToServerKey[:], testProtocolID)
+		server.processPacketAt(&from, raw[:n], tokenLifetimeTimestamp)
+		if server.NumConnectedClients() == 1 {
+			fmt.Fprintf(&out, "response %d -> connects\n", timeout)
+		} else {
+			fmt.Fprintf(&out, "response %d -> refused\n", timeout)
+		}
+		server.Close()
+	}
+
+	expires := []struct {
+		name  string
+		value uint64
+	}{
+		{"uint64max", ^uint64(0)},
+		{"current+2max", tokenLifetimeTimestamp + 2*DefaultMaxConnectTokenLifetime},
+		{"current+max+1", tokenLifetimeTimestamp + DefaultMaxConnectTokenLifetime + 1},
+		{"current+max", tokenLifetimeTimestamp + DefaultMaxConnectTokenLifetime},
+		{"current+1", tokenLifetimeTimestamp + 1},
+		{"current", tokenLifetimeTimestamp},
+	}
+	for _, e := range expires {
+		sent := []lifetimeSentPacket{}
+		server := lifetimeServer(t, &sent)
+		request, _, serverToClientKey := lifetimeConnectToken(t, testTimeoutSeconds, e.value)
+		var raw [maxPacketBytes]byte
+		n := writePacket(request, raw[:], 0, nil, testProtocolID)
+		server.time = 0.0
+		server.processPacketAt(&from, raw[:n], tokenLifetimeTimestamp)
+		if _, ok := lifetimeFindChallenge(sent, &from, serverToClientKey); ok {
+			fmt.Fprintf(&out, "expire %s -> accepted\n", e.name)
+		} else {
+			fmt.Fprintf(&out, "expire %s -> refused\n", e.name)
+		}
+		server.Close()
+	}
+
+	return out.String()
+}
+
+// TestTokenLifetimeTranscript pins the port's token-lifetime behaviour: a
+// preconnect mapping holds its own bounded lifetime (10 seconds for a
+// non-positive timeout) and a connection request whose expire timestamp is
+// more than MaxConnectTokenLifetime past the current timestamp is refused.
+func TestTokenLifetimeTranscript(t *testing.T) {
+	got := tokenLifetimeTranscript(t)
+	want := "preconnect -1 -> 10\n" +
+		"preconnect 0 -> 10\n" +
+		"preconnect 1 -> 1\n" +
+		"preconnect 5 -> 5\n" +
+		"preconnect 30 -> 30\n" +
+		"response -1 -> connects\n" +
+		"response 0 -> connects\n" +
+		"response 1 -> connects\n" +
+		"response 5 -> connects\n" +
+		"response 30 -> connects\n" +
+		"expire uint64max -> refused\n" +
+		"expire current+2max -> refused\n" +
+		"expire current+max+1 -> refused\n" +
+		"expire current+max -> accepted\n" +
+		"expire current+1 -> accepted\n" +
+		"expire current -> refused\n"
+	if got != want {
+		t.Fatalf("token-lifetime transcript differs:\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}
+
+// TestCDifferentialTokenLifetimes compares the port's token-lifetime behaviour
+// against the C reference on the same inputs. It is a functional test on fixed
+// bytes with no socket and no clock, gated on NETCODE_C_DIR so the hermetic
+// unit gate skips it. Run with:
+//
+//	NETCODE_C_DIR=<checkout> go test -count=1 -run TestCDifferentialTokenLifetimes .
+func TestCDifferentialTokenLifetimes(t *testing.T) {
+	cDir := os.Getenv("NETCODE_C_DIR")
+	if cDir == "" {
+		t.Skip("set NETCODE_C_DIR to the C reference checkout (mas-bandwidth/netcode, branch sprint/netcode-audit-fixes at or after 067b1959) to run the token-lifetime differential test")
+	}
+	if _, err := os.Stat(filepath.Join(cDir, "netcode.c")); err != nil {
+		t.Fatalf("NETCODE_C_DIR does not contain netcode.c: %v", err)
+	}
+
+	tmp := t.TempDir()
+	oracleBin := filepath.Join(tmp, "oracle")
+	build := exec.Command("cc", "-O2", "-ffp-contract=off",
+		"-I", cDir, "-I", filepath.Join(cDir, "sodium"),
+		"-o", oracleBin, filepath.Join("testdata", "c", "oracle.c"),
+		filepath.Join(cDir, "sodium", "sodium.c"), "-lm")
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to build C oracle: %v\n%s", err, out)
+	}
+
+	run := exec.Command(oracleBin, "lifetimes")
+	cBytes, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("C oracle failed: %v\n%s", err, cBytes)
+	}
+	cTranscript := string(cBytes)
+	goTranscript := tokenLifetimeTranscript(t)
+
+	if cTranscript != goTranscript {
+		cLines := strings.Split(cTranscript, "\n")
+		gLines := strings.Split(goTranscript, "\n")
+		for i := 0; i < len(cLines) && i < len(gLines); i++ {
+			if cLines[i] != gLines[i] {
+				t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+				break
+			}
+		}
+		t.Errorf("C and Go token-lifetime transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
 	}
 }
