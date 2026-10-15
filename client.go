@@ -72,6 +72,8 @@ type Client struct {
 	challengeTokenSequence uint64
 	challengeTokenData     [challengeTokenBytes]byte
 	loopback               bool
+	lastConnectTokenMAC    [MacBytes]byte
+	hasLastConnectTokenMac bool
 }
 
 func clientCreateSocket(address *Address, config *ClientConfig) (*socket, error) {
@@ -249,6 +251,20 @@ func (client *Client) Connect(connectTokenData []byte) {
 		client.setState(ClientStateInvalidConnectToken)
 		return
 	}
+
+	// refuse a reused connect token: the private data ends with the MAC that
+	// encrypts it, and presenting the same token bytes again would restart the
+	// client sequence under the same client-to-server key, so remember the last
+	// token's MAC across disconnects and compare it here.
+	var mac [MacBytes]byte
+	copy(mac[:], client.connectToken.privateData[connectTokenPrivateBytes-MacBytes:])
+	if client.hasLastConnectTokenMac && mac == client.lastConnectTokenMAC {
+		printf(LogLevelInfo, "client refused a reused connect token\n")
+		client.setState(ClientStateInvalidConnectToken)
+		return
+	}
+	client.lastConnectTokenMAC = mac
+	client.hasLastConnectTokenMac = true
 
 	client.serverAddressIndex = 0
 	client.serverAddress = client.connectToken.serverAddresses[0]

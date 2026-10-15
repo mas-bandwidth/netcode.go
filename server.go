@@ -209,7 +209,7 @@ func NewServerDual(serverAddress1String string, serverAddress2String string, con
 		address:        serverAddress1,
 		address2:       serverAddress2,
 		time:           time,
-		globalSequence: 1 << 63,
+		globalSequence: seedGlobalSequence(),
 	}
 	server.socketHolder.ipv4 = socketIPv4
 	server.socketHolder.ipv6 = socketIPv6
@@ -227,6 +227,21 @@ func NewServerDual(serverAddress1String string, serverAddress2String string, con
 	}
 
 	return server, nil
+}
+
+// seedGlobalSequence seeds the server's global packet sequence to 1<<63 plus a
+// random 62-bit offset, so it stays in the top half of the sequence space
+// (where per-client sequences starting at zero never reach it) while two
+// servers sharing a token start from different offsets instead of encrypting
+// their first challenge under the same key and nonce.
+func seedGlobalSequence() uint64 {
+	var b [8]byte
+	RandomBytes(b[:])
+	var offset uint64
+	for i := 0; i < 8; i++ {
+		offset |= uint64(b[i]) << (8 * i)
+	}
+	return 1<<63 | (offset >> 2)
 }
 
 // NewServer creates a server with a single public address, e.g.
@@ -272,7 +287,7 @@ func (server *Server) startAt(maxClients int, currentTimestamp uint64) {
 	// in the top half of the sequence space to keep AEAD nonces disjoint under a shared key.
 	// Stop() also resets it, so it must be re-seeded on every Start(), not just in NewServer,
 	// or a stopped-and-restarted server would reuse nonces.
-	server.globalSequence = 1 << 63
+	server.globalSequence = seedGlobalSequence()
 	server.challengeSequence = 0
 	RandomBytes(server.challengeKey[:])
 	server.minConnectTokenExpireTimestamp = currentTimestamp + uint64(server.config.MaxConnectTokenLifetime)
@@ -447,7 +462,7 @@ func (server *Server) Stop() {
 
 	// never let the global sequence return to zero (see Start): zero would collide AEAD
 	// nonces with per-client packets under the shared key on a restart.
-	server.globalSequence = 1 << 63
+	server.globalSequence = seedGlobalSequence()
 	server.challengeSequence = 0
 	server.challengeKey = [KeyBytes]byte{}
 

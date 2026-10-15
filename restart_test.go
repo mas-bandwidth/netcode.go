@@ -7,7 +7,7 @@ import "testing"
 // encrypt under the same per-token server-to-client key as per-client packets,
 // whose sequences start at zero, so the server's global sequence must stay in
 // the top half of the sequence space. A stopped-and-restarted server must
-// re-seed it, or it reuses nonces.
+// re-seed it to a different value, or it reuses nonces.
 func TestServerRestartGlobalSequence(t *testing.T) {
 	serverConfig := &ServerConfig{
 		ProtocolID: testProtocolID,
@@ -20,8 +20,9 @@ func TestServerRestartGlobalSequence(t *testing.T) {
 	// each of the three sites that seed the sequence is checked on its own below,
 	// since Start re-seeds unconditionally and would otherwise hide a drop in either
 	// of the other two
-	if server.globalSequence != 1<<63 {
-		t.Fatalf("NewServer did not seed the global sequence: %d", server.globalSequence)
+	firstSeed := server.globalSequence
+	if firstSeed < 1<<63 {
+		t.Fatalf("NewServer did not seed the global sequence in the top half: %d", firstSeed)
 	}
 
 	server.Start(1)
@@ -32,15 +33,16 @@ func TestServerRestartGlobalSequence(t *testing.T) {
 
 	// Stop has to re-seed on its own, so keep this check even though the one after
 	// the restart below looks like it covers the same ground.
-	if server.globalSequence != 1<<63 {
-		t.Fatalf("Stop did not re-seed the global sequence: %d", server.globalSequence)
+	afterStop := server.globalSequence
+	if afterStop < 1<<63 {
+		t.Fatalf("Stop did not re-seed the global sequence in the top half: %d", afterStop)
 	}
 
 	server.Start(1)
 
 	// after a restart the global sequence must be back in the top half, not near zero
-	if server.globalSequence != 1<<63 {
-		t.Fatalf("Start did not re-seed the global sequence: %d", server.globalSequence)
+	if server.globalSequence < 1<<63 {
+		t.Fatalf("Start did not re-seed the global sequence in the top half: %d", server.globalSequence)
 	}
 }
 

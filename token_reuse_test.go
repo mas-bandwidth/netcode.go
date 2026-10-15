@@ -47,16 +47,10 @@ func TestClientReconnectWithUsedConnectToken(t *testing.T) {
 
 	check(t, server.NumConnectedClients() == 0)
 
-	// the connect token is spent. presenting it again from the same address connects nothing:
-	// the client runs out of connection request retries instead
+	// the connect token is spent. presenting it again from the same address is
+	// refused outright: the client remembers the token's MAC and goes straight to
+	// invalid connect token without sending a connection request.
 	client.Connect(connectToken)
-
-	for client.State() > ClientStateDisconnected && client.State() != ClientStateConnected {
-		simulator.Update(currentTime)
-		client.Update(currentTime)
-		server.Update(currentTime)
-		currentTime += deltaTime
-	}
 
 	check(t, client.State() == ClientStateInvalidConnectToken)
 	check(t, server.NumConnectedClients() == 0)
