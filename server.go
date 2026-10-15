@@ -100,6 +100,7 @@ type Server struct {
 	clientLoopback                 [MaxClients]bool
 	clientConfirmed                [MaxClients]bool
 	clientDisconnectReason         [MaxClients]int
+	clientDisconnecting            [MaxClients]bool
 	clientEncryptionIndex          [MaxClients]int
 	clientID                       [MaxClients]uint64
 	clientSequence                 [MaxClients]uint64
@@ -369,6 +370,7 @@ func (server *Server) resetClientSlot(clientIndex int) {
 	server.clientConnected[clientIndex] = false
 	server.clientLoopback[clientIndex] = false
 	server.clientConfirmed[clientIndex] = false
+	server.clientDisconnecting[clientIndex] = false
 	server.clientID[clientIndex] = 0
 	server.clientSequence[clientIndex] = 0
 	server.clientLastPacketSendTime[clientIndex] = 0.0
@@ -387,8 +389,22 @@ func (server *Server) disconnectClientInternal(clientIndex int, sendDisconnectPa
 
 	server.clientDisconnectReason[clientIndex] = disconnectReason
 
+	// mark the slot as disconnecting before the callback, so a callback that re-enters
+	// (disconnecting the same client, or stopping the server) cannot clear the slot twice.
+
+	server.clientDisconnecting[clientIndex] = true
+
+	// destroying the server inside this callback is unsupported.
+
 	if server.config.ConnectDisconnectCallback != nil {
 		server.config.ConnectDisconnectCallback(clientIndex, false)
+	}
+
+	// the callback may have stopped the server or disconnected the slot itself; in either
+	// case the slot is already cleared and there is nothing left to do here.
+
+	if !server.running || !server.clientConnected[clientIndex] {
+		return
 	}
 
 	if sendDisconnectPackets {
@@ -402,7 +418,9 @@ func (server *Server) disconnectClientInternal(clientIndex int, sendDisconnectPa
 
 	server.clientReplayProtection[clientIndex].reset()
 
-	server.encryptionManager.clientIndex[server.clientEncryptionIndex[clientIndex]] = -1
+	if server.clientEncryptionIndex[clientIndex] >= 0 {
+		server.encryptionManager.clientIndex[server.clientEncryptionIndex[clientIndex]] = -1
+	}
 
 	server.encryptionManager.removeEncryptionMapping(&server.clientAddress[clientIndex], server.time)
 
@@ -429,6 +447,10 @@ func (server *Server) DisconnectClient(clientIndex int) {
 		return
 	}
 
+	if server.clientDisconnecting[clientIndex] {
+		return
+	}
+
 	server.disconnectClientInternal(clientIndex, true, DisconnectReasonServerDisconnect)
 }
 
@@ -440,7 +462,7 @@ func (server *Server) DisconnectAllClients() {
 	}
 
 	for i := 0; i < server.maxClients; i++ {
-		if server.clientConnected[i] && !server.clientLoopback[i] {
+		if server.clientConnected[i] && !server.clientLoopback[i] && !server.clientDisconnecting[i] {
 			server.disconnectClientInternal(i, true, DisconnectReasonServerDisconnect)
 		}
 	}
@@ -458,8 +480,17 @@ func (server *Server) Stop() {
 	// loopback clients are not disconnected above, but they must not survive a server stop
 
 	for i := 0; i < server.maxClients; i++ {
-		if server.clientConnected[i] && server.clientLoopback[i] {
+		if server.clientConnected[i] && server.clientLoopback[i] && !server.clientDisconnecting[i] {
 			server.DisconnectLoopbackClient(i)
+		}
+	}
+
+	// a disconnect callback that called Stop left its slot disconnecting: clear it here
+	// without a second callback, so a restart finds every slot empty.
+
+	for i := 0; i < server.maxClients; i++ {
+		if server.clientDisconnecting[i] {
+			server.resetClientSlot(i)
 		}
 	}
 
@@ -1129,12 +1160,24 @@ func (server *Server) DisconnectLoopbackClient(clientIndex int) {
 		return
 	}
 
+	if server.clientDisconnecting[clientIndex] {
+		return
+	}
+
 	printf(LogLevelInfo, "server disconnected loopback client %d\n", clientIndex)
 
 	server.clientDisconnectReason[clientIndex] = DisconnectReasonServerDisconnect
 
+	server.clientDisconnecting[clientIndex] = true
+
+	// destroying the server inside this callback is unsupported.
+
 	if server.config.ConnectDisconnectCallback != nil {
 		server.config.ConnectDisconnectCallback(clientIndex, false)
+	}
+
+	if !server.running || !server.clientConnected[clientIndex] {
+		return
 	}
 
 	server.resetClientSlot(clientIndex)
