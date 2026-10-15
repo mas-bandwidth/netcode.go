@@ -1710,3 +1710,39 @@ func TestConnectionResponseRefusesAnotherMappingsChallenge(t *testing.T) {
 		t.Fatalf("connection response transcript differs:\nwant:\n%s\ngot:\n%s", want, got)
 	}
 }
+
+// generateTestConnectTokenAddresses builds a connect token with the given
+// server address list (public and internal identical).
+func generateTestConnectTokenAddresses(t *testing.T, serverAddresses []string) []byte {
+	t.Helper()
+	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
+		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+	check(t, err == nil)
+	return connectToken
+}
+
+func TestConnectRefusesAnAddressFamilyItHasNoSocketFor(t *testing.T) {
+	// a client bound only for IPv4, given a token whose only server address is
+	// IPv6, ends in INVALID_CONNECT_TOKEN instead of waiting out the timeout
+	ipv6Only := generateTestConnectTokenAddresses(t, []string{"[::1]:40000"})
+	client := &Client{socketHolder: socketHolder{ipv4: &socket{}}}
+	client.Connect(ipv6Only)
+	check(t, client.State() == ClientStateInvalidConnectToken)
+
+	// [::1] then 127.0.0.1: the client settles on the address whose family it
+	// has a socket for (the second)
+	mixed := generateTestConnectTokenAddresses(t, []string{"[::1]:40000", "127.0.0.1:40000"})
+	client = &Client{socketHolder: socketHolder{ipv4: &socket{}}}
+	client.Connect(mixed)
+	check(t, client.State() == ClientStateSendingConnectionRequest)
+	check(t, client.serverAddressIndex == 1)
+	check(t, client.serverAddress.Type == AddressIPv4)
+
+	// a token whose only address is IPv4 settles on the first address
+	ipv4Only := generateTestConnectTokenAddresses(t, []string{"127.0.0.1:40000"})
+	client = &Client{socketHolder: socketHolder{ipv4: &socket{}}}
+	client.Connect(ipv4Only)
+	check(t, client.State() == ClientStateSendingConnectionRequest)
+	check(t, client.serverAddressIndex == 0)
+	check(t, client.serverAddress.Type == AddressIPv4)
+}
