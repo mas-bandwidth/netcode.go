@@ -1502,3 +1502,87 @@ func TestCDifferentialTokenLifetimes(t *testing.T) {
 		t.Errorf("C and Go token-lifetime transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Address-family differential (go-netcode-client-refuses-a-server-address-it-
+// has-no-socket-for).
+
+// clientAddressFamilyTranscript drives an IPv4-only client through the three
+// token address lists and prints one line per token:
+//
+//	token<n> state <state> address <index|none>
+func clientAddressFamilyTranscript(t *testing.T) string {
+	t.Helper()
+	tokens := [][]byte{
+		generateTestConnectTokenAddresses(t, []string{"[::1]:40000"}),
+		generateTestConnectTokenAddresses(t, []string{"[::1]:40000", "127.0.0.1:40000"}),
+		generateTestConnectTokenAddresses(t, []string{"127.0.0.1:40000"}),
+	}
+	var out strings.Builder
+	for i, tokenData := range tokens {
+		client := &Client{socketHolder: socketHolder{ipv4: &socket{}}}
+		client.Connect(tokenData)
+		if client.State() == ClientStateInvalidConnectToken {
+			fmt.Fprintf(&out, "token%d state %d address none\n", i, client.State())
+		} else {
+			fmt.Fprintf(&out, "token%d state %d address %d\n", i, client.State(), client.serverAddressIndex)
+		}
+	}
+	return out.String()
+}
+
+func TestClientAddressFamilyTranscript(t *testing.T) {
+	got := clientAddressFamilyTranscript(t)
+	want := "token0 state -5 address none\n" +
+		"token1 state 1 address 1\n" +
+		"token2 state 1 address 0\n"
+	if got != want {
+		t.Fatalf("client address-family transcript differs:\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}
+
+// TestCDifferentialAddressFamily compares the port's client address-family
+// refusal against the C reference on the same inputs. Gated on NETCODE_C_DIR so
+// the hermetic unit gate skips it. Run with:
+//
+//	NETCODE_C_DIR=<checkout> go test -count=1 -run TestCDifferentialAddressFamily .
+func TestCDifferentialAddressFamily(t *testing.T) {
+	cDir := os.Getenv("NETCODE_C_DIR")
+	if cDir == "" {
+		t.Skip("set NETCODE_C_DIR to the C reference checkout (mas-bandwidth/netcode, branch sprint/netcode-audit-fixes at or after 39f04965) to run the address-family differential test")
+	}
+	if _, err := os.Stat(filepath.Join(cDir, "netcode.c")); err != nil {
+		t.Fatalf("NETCODE_C_DIR does not contain netcode.c: %v", err)
+	}
+
+	tmp := t.TempDir()
+	oracleBin := filepath.Join(tmp, "oracle")
+	build := exec.Command("cc", "-O2", "-ffp-contract=off",
+		"-I", cDir, "-I", filepath.Join(cDir, "sodium"),
+		"-o", oracleBin, filepath.Join("testdata", "c", "oracle.c"),
+		filepath.Join(cDir, "sodium", "sodium.c"), "-lm")
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to build C oracle: %v\n%s", err, out)
+	}
+
+	run := exec.Command(oracleBin, "addressfamily")
+	cBytes, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("C oracle failed: %v\n%s", err, cBytes)
+	}
+	cTranscript := string(cBytes)
+	goTranscript := clientAddressFamilyTranscript(t)
+
+	if cTranscript != goTranscript {
+		cLines := strings.Split(cTranscript, "\n")
+		gLines := strings.Split(goTranscript, "\n")
+		for i := 0; i < len(cLines) && i < len(gLines); i++ {
+			if cLines[i] != gLines[i] {
+				t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+				break
+			}
+		}
+		t.Errorf("C and Go address-family transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
+	}
+}
