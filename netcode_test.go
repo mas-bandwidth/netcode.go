@@ -13,7 +13,7 @@ const (
 	testProtocolID         = 0x1122334455667788
 	testClientID           = 0x1
 	testServerPort         = 40000
-	testConnectTokenExpiry = 30
+	testConnectTokenExpiry = 60
 	testTimeoutSeconds     = 15
 )
 
@@ -498,6 +498,57 @@ func TestConnectionRequestPacket(t *testing.T) {
 	check(t, bytes.Equal(outputPacket.connectTokenData[:connectTokenPrivateBytes-MacBytes], connectTokenData[:connectTokenPrivateBytes-MacBytes]))
 }
 
+// TestRestartFloorRefusesEqualExpiry pins the restart floor's equal-expiry
+// edge. A full-lifetime token issued in the same whole second as the server
+// started has expiry equal to the floor, and must be refused: the floor is the
+// server start time plus the max token lifetime, and the token expiry is whole
+// seconds, so the strict < would accept it.
+func TestRestartFloorRefusesEqualExpiry(t *testing.T) {
+	t.Parallel()
+
+	serverAddress := testServerAddress()
+	userData := make([]byte, UserDataBytes)
+	RandomBytes(userData)
+
+	inputToken := generateConnectTokenPrivate(testClientID, testTimeoutSeconds, []Address{serverAddress}, userData)
+
+	const floor = uint64(2000000000)
+	currentTimestamp := floor - 100
+
+	privateKey := GenerateKey()
+	nonce := generateNonce()
+
+	build := func(expire uint64) []byte {
+		var connectTokenData [connectTokenPrivateBytes]byte
+		inputToken.write(connectTokenData[:])
+		encrypted := connectTokenData
+		check(t, encryptConnectTokenPrivate(encrypted[:], testProtocolID, expire, nonce[:], privateKey) == nil)
+		request := &connectionRequest{
+			versionInfo:                 versionInfo,
+			protocolID:                  testProtocolID,
+			connectTokenExpireTimestamp: expire,
+			connectTokenNonce:           nonce,
+			connectTokenData:            encrypted,
+		}
+		var buffer [2048]byte
+		bytesWritten := writePacket(request, buffer[:], 1000, GenerateKey(), testProtocolID)
+		check(t, bytesWritten > 0)
+		return append([]byte(nil), buffer[:bytesWritten]...)
+	}
+
+	allowed := allPacketsAllowed()
+
+	read := func(data []byte) *connectionRequest {
+		var sequence uint64
+		p, _ := readPacket(data, &sequence, GenerateKey(), testProtocolID, currentTimestamp, floor, privateKey, &allowed, nil).(*connectionRequest)
+		return p
+	}
+
+	check(t, read(build(floor-1)) == nil)
+	check(t, read(build(floor)) == nil)
+	check(t, read(build(floor+1)) != nil)
+}
+
 func TestConnectionDeniedPacket(t *testing.T) {
 	// setup a connection denied packet
 
@@ -956,6 +1007,32 @@ func TestReplayProtection(t *testing.T) {
 	// while packets that fell out of the window are rejected as before
 
 	check(t, replay.alreadyReceived(maxUint64-1-replayProtectionBufferSize))
+
+	// the top of the sequence space (UINT64_MAX) doubles as the empty-slot marker the
+	// table is filled with, so after advancing to it the slot still reads as empty and a
+	// packet at that sequence could be replayed without limit. it must be treated as
+	// always received.
+
+	replay.reset()
+	check(t, replay.alreadyReceived(maxUint64))
+	replay.advanceSequence(maxUint64)
+	check(t, replay.alreadyReceived(maxUint64))
+
+	// a keep-alive whose prefix says eight sequence bytes, all 0xFF, read against a replay
+	// protection already advanced to UINT64_MAX must be refused before any decrypt.
+
+	var keepAliveBuffer [maxPacketBytes]byte
+	keepAlive := &connectionKeepAlive{clientIndex: 0, maxClients: 1}
+	packetKey := GenerateKey()
+	keepAliveBytes := writePacket(keepAlive, keepAliveBuffer[:], maxUint64, packetKey, testProtocolID)
+	check(t, keepAliveBytes > 0)
+
+	replay.reset()
+	replay.advanceSequence(maxUint64)
+	var keepAliveSequence uint64
+	allowedPackets := allPacketsAllowed()
+	outputPacket := readPacket(keepAliveBuffer[:keepAliveBytes], &keepAliveSequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, &replay)
+	check(t, outputPacket == nil)
 }
 
 func TestRuntimeGuards(t *testing.T) {

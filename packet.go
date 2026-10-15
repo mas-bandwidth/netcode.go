@@ -235,7 +235,7 @@ func readPacket(buffer []byte,
 		// a connect token that could have been issued before the server started is refused: its keys
 		// were already used to encrypt packets under sequence numbers that start again from zero.
 
-		if packetConnectTokenExpireTimestamp < minConnectTokenExpireTimestamp {
+		if packetConnectTokenExpireTimestamp <= minConnectTokenExpireTimestamp {
 			printf(LogLevelDebug, "ignored connection request packet. connect token predates the server start\n")
 			return nil
 		}

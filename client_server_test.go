@@ -40,6 +40,14 @@ func generateTestConnectToken(t *testing.T, serverAddress string, expireSeconds 
 	return connectToken
 }
 
+func generateTestConnectTokenWithUserData(t *testing.T, serverAddress string, expireSeconds int, timeoutSeconds int, clientID uint64, userData []byte) []byte {
+	t.Helper()
+	connectToken, err := GenerateConnectToken([]string{serverAddress}, []string{serverAddress},
+		expireSeconds, timeoutSeconds, clientID, testProtocolID, testPrivateKey[:], userData)
+	check(t, err == nil)
+	return connectToken
+}
+
 // pumpUntilConnected runs the standard connect loop: update the simulator,
 // client and server until the client either connects or fails.
 func pumpUntilConnected(simulator *NetworkSimulator, client *Client, server *Server, currentTime *float64, deltaTime float64) {
@@ -855,6 +863,131 @@ func TestClientSideDisconnect(t *testing.T) {
 	check(t, !server.ClientConnected(0))
 	check(t, server.NumConnectedClients() == 0)
 	check(t, server.ClientDisconnectReason(0) == DisconnectReasonClientDisconnect)
+}
+
+// disconnectReentryCase describes one of the C reference's three re-entrant
+// disconnect callback scenarios, over one server with one admitted client.
+type disconnectReentryCase struct {
+	name string
+	// reenter is invoked from inside the disconnect callback exactly once,
+	// standing in for the callback re-entering a clearing slot.
+	reenter func(server *Server)
+	// timeout drives the disconnect through checkForTimeouts instead of
+	// DisconnectClient when true.
+	timeout bool
+	// reason is the disconnect reason the callback must observe.
+	reason int
+}
+
+// runDisconnectReentryCase connects one client with a known id and user data,
+// then disconnects it in a way that makes the callback re-enter. It returns
+// the recorded observations and the final server state for the assertions.
+func runDisconnectReentryCase(t *testing.T, c disconnectReentryCase) (callbacks int, sawReason int, sawID uint64, sawUser byte, connected int, mappings int, slotConnected bool, slotEncryptionIndex int) {
+	t.Helper()
+
+	simulator := NewNetworkSimulator()
+	currentTime := 0.0
+	deltaTime := 1.0 / 10.0
+
+	clientID := uint64(0xABCDEF)
+	userData := []byte{0x5A, 0x00, 0x00, 0x00}
+
+	var server *Server
+
+	var reentered bool
+	callback := func(clientIndex int, connected_ bool) {
+		if connected_ {
+			return
+		}
+		callbacks++
+		sawReason = server.ClientDisconnectReason(clientIndex)
+		sawID = server.ClientID(clientIndex)
+		if ud := server.ClientUserData(clientIndex); len(ud) > 0 {
+			sawUser = ud[0]
+		}
+		if !reentered {
+			reentered = true
+			c.reenter(server)
+		}
+	}
+
+	serverConfig := &ServerConfig{
+		ProtocolID:                testProtocolID,
+		PrivateKey:                testPrivateKey,
+		NetworkSimulator:          simulator,
+		ConnectDisconnectCallback: callback,
+	}
+
+	var err error
+	server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	connectToken := generateTestConnectTokenWithUserData(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, clientID, userData)
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+	client, err := NewClient("[::]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	client.Connect(connectToken)
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+	check(t, client.State() == ClientStateConnected)
+	check(t, server.ClientConnected(0))
+
+	if c.timeout {
+		for i := 0; i < 200; i++ {
+			simulator.Update(currentTime)
+			server.Update(currentTime)
+			if !server.ClientConnected(0) {
+				break
+			}
+			currentTime += deltaTime
+		}
+	} else {
+		server.DisconnectClient(0)
+	}
+
+	connected = server.NumConnectedClients()
+	mappings = server.encryptionManager.numEncryptionMappings
+	slotConnected = server.clientConnected[0]
+	slotEncryptionIndex = server.clientEncryptionIndex[0]
+
+	return
+}
+
+// TestDisconnectCallbackReentryIsHarmless pins the three C reference cases for
+// a disconnect callback that re-enters a clearing slot: (A) disconnecting the
+// same client, (B) stopping the server, (C) a timeout whose callback stops the
+// server. In every case the callback must fire exactly once and the server must
+// end with a zero client count and a clear slot, never a negative count or a
+// panic from indexing the encryption mapping with -1.
+func TestDisconnectCallbackReentryIsHarmless(t *testing.T) {
+	t.Parallel()
+
+	cases := []disconnectReentryCase{
+		{"same-client", func(server *Server) { server.DisconnectClient(0) }, false, DisconnectReasonServerDisconnect},
+		{"stop-then-restart", func(server *Server) { server.Stop() }, false, DisconnectReasonServerDisconnect},
+		{"timeout-stop", func(server *Server) { server.Stop() }, true, DisconnectReasonTimedOut},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			callbacks, sawReason, sawID, sawUser, connected, mappings, slotConnected, slotEncryptionIndex := runDisconnectReentryCase(t, c)
+
+			check(t, callbacks == 1)
+			check(t, sawReason == c.reason)
+			check(t, sawID == 0xABCDEF)
+			check(t, sawUser == 0x5A)
+			check(t, connected == 0)
+			check(t, mappings == 0)
+			check(t, !slotConnected)
+			check(t, slotEncryptionIndex == -1)
+		})
+	}
 }
 
 func TestServerSideDisconnect(t *testing.T) {

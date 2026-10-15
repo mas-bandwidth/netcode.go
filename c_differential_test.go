@@ -790,6 +790,349 @@ func TestCDifferentialOverrideCallbacks(t *testing.T) {
 	t.Errorf("C and Go override callbacks transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
 }
 
+// disconnectReentryToken builds one connect token with a fixed client id and
+// user data, minted by the port, that the C oracle and the port transcript
+// both admit.
+func disconnectReentryToken(t *testing.T) []byte {
+	t.Helper()
+	token, err := GenerateConnectToken([]string{"[::1]:40000"}, []string{"[::1]:40000"},
+		600, testTimeoutSeconds, 0xABCDEF, testProtocolID, testPrivateKey[:], []byte{0x5A})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+// disconnectReentryTranscript runs the C reference's three re-entrant
+// disconnect cases over one admitted client and prints one line per case:
+//
+//	<case> callbacks <n> saw <reason> <id> <userdata-first-byte> connected <n> mappings <n> slot <connected|clear>
+//
+// The transport is the simulator with an injected clock, so no socket is
+// opened and no wall clock is read.
+func disconnectReentryTranscript(t *testing.T, token []byte) string {
+	t.Helper()
+
+	var out strings.Builder
+
+	run := func(name string, timeout, restart bool, reenter func(*Server)) {
+		simulator := NewNetworkSimulator()
+		currentTime := 0.0
+		deltaTime := 1.0 / 10.0
+
+		var server *Server
+		callbacks := 0
+		sawReason := -1
+		var sawID uint64
+		var sawUser byte
+		var reentered bool
+
+		callback := func(clientIndex int, connected bool) {
+			if connected {
+				return
+			}
+			callbacks++
+			sawReason = server.ClientDisconnectReason(clientIndex)
+			sawID = server.ClientID(clientIndex)
+			if ud := server.ClientUserData(clientIndex); len(ud) > 0 {
+				sawUser = ud[0]
+			}
+			if !reentered {
+				reentered = true
+				reenter(server)
+			}
+		}
+
+		serverConfig := &ServerConfig{
+			ProtocolID:                testProtocolID,
+			PrivateKey:                testPrivateKey,
+			NetworkSimulator:          simulator,
+			ConnectDisconnectCallback: callback,
+		}
+		var err error
+		server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		server.Start(1)
+
+		client, err := NewClient("[::]:50000", &ClientConfig{NetworkSimulator: simulator}, currentTime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.Connect(token)
+		pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+		client.Close()
+
+		if timeout {
+			for i := 0; i < 200; i++ {
+				simulator.Update(currentTime)
+				server.Update(currentTime)
+				if !server.clientConnected[0] {
+					break
+				}
+				currentTime += deltaTime
+			}
+		} else {
+			server.DisconnectClient(0)
+		}
+
+		connected := server.NumConnectedClients()
+		mappings := server.encryptionManager.numEncryptionMappings
+
+		if restart {
+			server.Start(1)
+		}
+
+		slot := "clear"
+		if server.clientConnected[0] {
+			slot = "connected"
+		}
+
+		fmt.Fprintf(&out, "%s callbacks %d saw %d %d %d connected %d mappings %d slot %s\n",
+			name, callbacks, sawReason, sawID, sawUser, connected, mappings, slot)
+		server.Close()
+	}
+
+	run("same-client", false, false, func(s *Server) { s.DisconnectClient(0) })
+	run("stop-then-restart", false, true, func(s *Server) { s.Stop() })
+	run("timeout-stop", true, false, func(s *Server) { s.Stop() })
+
+	return out.String()
+}
+
+// TestCDifferentialDisconnect compares the port's disconnect-callback re-entry
+// behaviour against the C reference. It is a functional test on fixed bytes
+// with no socket, gated on NETCODE_C_DIR so the hermetic unit gate skips it.
+// Run with:
+//
+//	NETCODE_C_DIR=<checkout> go test -count=1 -run TestCDifferentialDisconnect .
+func TestCDifferentialDisconnect(t *testing.T) {
+	cDir := os.Getenv("NETCODE_C_DIR")
+	if cDir == "" {
+		t.Skip("set NETCODE_C_DIR to the C reference checkout (mas-bandwidth/netcode, branch sprint/netcode-audit-fixes at or after bbf9805a) to run the disconnect differential")
+	}
+	if _, err := os.Stat(filepath.Join(cDir, "netcode.c")); err != nil {
+		t.Fatalf("NETCODE_C_DIR does not contain netcode.c: %v", err)
+	}
+
+	tmp := t.TempDir()
+	oracleBin := filepath.Join(tmp, "oracle")
+	build := exec.Command("cc", "-O2", "-ffp-contract=off",
+		"-I", cDir, "-I", filepath.Join(cDir, "sodium"),
+		"-o", oracleBin, filepath.Join("testdata", "c", "oracle.c"),
+		filepath.Join(cDir, "sodium", "sodium.c"), "-lm")
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to build C oracle: %v\n%s", err, out)
+	}
+
+	token := disconnectReentryToken(t)
+	tokenPath := filepath.Join(tmp, "disconnect-token.bin")
+	if err := os.WriteFile(tokenPath, token, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cBytes, err := exec.Command(oracleBin, "disconnect", tokenPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("C oracle failed: %v\n%s", err, cBytes)
+	}
+	cTranscript := string(cBytes)
+	goTranscript := disconnectReentryTranscript(t, token)
+
+	if cTranscript != goTranscript {
+		cLines := strings.Split(cTranscript, "\n")
+		gLines := strings.Split(goTranscript, "\n")
+		for i := 0; i < len(cLines) && i < len(gLines); i++ {
+			if cLines[i] != gLines[i] {
+				t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+				break
+			}
+		}
+		t.Errorf("C and Go disconnect transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
+	}
+}
+
+// replayFloor is the restart floor and the current time the connection
+// request probes are read against (current = floor - 100), fixed on both sides.
+const replayFloor uint64 = 2000000000
+
+func replaySequenceList() []uint64 {
+	max := uint64(0xFFFFFFFFFFFFFFFF)
+	return []uint64{0, 1, 255, 256, 257, max - 257, max - 256, max - 255, max - 1, max}
+}
+
+func acceptedOrRefused(ok bool) string {
+	if ok {
+		return "accepted"
+	}
+	return "refused"
+}
+
+// replayTranscript drives the port's replay protection and packet reader over
+// the fixed sequence list, a keep-alive at the top of the sequence space, and
+// three hand-built connection requests at the restart floor, printing one line
+// per probe in the oracle's form.
+func replayTranscript(t *testing.T, keepAlive []byte, requests [3][]byte, requestExpires [3]uint64) string {
+	t.Helper()
+
+	var out strings.Builder
+
+	max := uint64(0xFFFFFFFFFFFFFFFF)
+	list := replaySequenceList()
+	var replay replayProtection
+	replay.reset()
+	for i, s := range list {
+		fmt.Fprintf(&out, "already %d -> %d\n", s, boolInt(replay.alreadyReceived(s)))
+		replay.advanceSequence(s)
+		fmt.Fprintf(&out, "advance %d -> %d\n", s, boolInt(replay.alreadyReceived(s)))
+		for j := 0; j < i; j++ {
+			fmt.Fprintf(&out, "reprobe %d -> %d\n", list[j], boolInt(replay.alreadyReceived(list[j])))
+		}
+	}
+
+	replay.reset()
+	replay.advanceSequence(max)
+	allowed := allPacketsAllowed()
+	var kaSeq uint64
+	ka := readPacket(keepAlive, &kaSeq, fixturePacketKey(), fixtureProtocolID, 0, 0, fixturePrivateKey(), &allowed, &replay)
+	fmt.Fprintf(&out, "keepalive %d -> %s\n", kaSeq, acceptedOrRefused(ka != nil))
+
+	for i := 0; i < 3; i++ {
+		var seq uint64
+		req := readPacket(requests[i], &seq, nil, fixtureProtocolID, replayFloor-100, replayFloor, fixturePrivateKey(), &allowed, nil)
+		fmt.Fprintf(&out, "request %d -> %s\n", requestExpires[i], acceptedOrRefused(req != nil))
+	}
+
+	return out.String()
+}
+
+// buildReplayInputs builds the keep-alive and the three connection request
+// bytes the oracle and the port transcript both read.
+func buildReplayInputs(t *testing.T) ([]byte, [3][]byte, [3]uint64) {
+	t.Helper()
+
+	max := uint64(0xFFFFFFFFFFFFFFFF)
+	var kaBuf [maxPacketBytes]byte
+	ka := &connectionKeepAlive{clientIndex: 0, maxClients: 1}
+	n := writePacket(ka, kaBuf[:], max, fixturePacketKey(), fixtureProtocolID)
+	if n == 0 {
+		t.Fatal("write keep-alive failed")
+	}
+	keepAlive := append([]byte(nil), kaBuf[:n]...)
+
+	address := testServerAddress()
+	token := generateConnectTokenPrivate(fixtureClientID, fixtureTimeoutSeconds, []Address{address}, nil)
+	nonce := fixtureConnectTokenNonce()
+
+	build := func(expire uint64) []byte {
+		var data [connectTokenPrivateBytes]byte
+		token.write(data[:])
+		if err := encryptConnectTokenPrivate(data[:], fixtureProtocolID, expire, nonce[:], fixturePrivateKey()); err != nil {
+			t.Fatal(err)
+		}
+		request := &connectionRequest{
+			versionInfo:                 versionInfo,
+			protocolID:                  fixtureProtocolID,
+			connectTokenExpireTimestamp: expire,
+			connectTokenNonce:           nonce,
+			connectTokenData:            data,
+		}
+		var buf [2048]byte
+		n := writePacket(request, buf[:], 1000, fixturePacketKey(), fixtureProtocolID)
+		if n == 0 {
+			t.Fatal("write request failed")
+		}
+		return append([]byte(nil), buf[:n]...)
+	}
+
+	var requestExpires [3]uint64 = [3]uint64{replayFloor - 1, replayFloor, replayFloor + 1}
+	var requests [3][]byte
+	requests[0] = build(requestExpires[0])
+	requests[1] = build(requestExpires[1])
+	requests[2] = build(requestExpires[2])
+
+	return keepAlive, requests, requestExpires
+}
+
+func writeReplayInputs(t *testing.T, path string, keepAlive []byte, requests [3][]byte, requestExpires [3]uint64) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	writeU32 := func(v uint32) {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], v)
+		buf.Write(b[:])
+	}
+	writeU64 := func(v uint64) {
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], v)
+		buf.Write(b[:])
+	}
+
+	writeU32(uint32(len(keepAlive)))
+	buf.Write(keepAlive)
+	for i := 0; i < 3; i++ {
+		writeU32(uint32(len(requests[i])))
+		writeU64(requestExpires[i])
+		buf.Write(requests[i])
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("failed to write replay inputs: %v", err)
+	}
+}
+
+// TestCDifferentialReplay compares the port's replay-protection top-sequence
+// edge and restart-floor equal-expiry edge against the C reference. It is a
+// functional test on fixed bytes with no socket, gated on NETCODE_C_DIR so the
+// hermetic unit gate skips it. Run with:
+//
+//	NETCODE_C_DIR=<checkout> go test -count=1 -run TestCDifferentialReplay .
+func TestCDifferentialReplay(t *testing.T) {
+	cDir := os.Getenv("NETCODE_C_DIR")
+	if cDir == "" {
+		t.Skip("set NETCODE_C_DIR to the C reference checkout (mas-bandwidth/netcode, branch sprint/netcode-audit-fixes at or after 60742a7a) to run the replay differential")
+	}
+	if _, err := os.Stat(filepath.Join(cDir, "netcode.c")); err != nil {
+		t.Fatalf("NETCODE_C_DIR does not contain netcode.c: %v", err)
+	}
+
+	tmp := t.TempDir()
+	oracleBin := filepath.Join(tmp, "oracle")
+	build := exec.Command("cc", "-O2", "-ffp-contract=off",
+		"-I", cDir, "-I", filepath.Join(cDir, "sodium"),
+		"-o", oracleBin, filepath.Join("testdata", "c", "oracle.c"),
+		filepath.Join(cDir, "sodium", "sodium.c"), "-lm")
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to build C oracle: %v\n%s", err, out)
+	}
+
+	keepAlive, requests, requestExpires := buildReplayInputs(t)
+	inputPath := filepath.Join(tmp, "replay_inputs.bin")
+	writeReplayInputs(t, inputPath, keepAlive, requests, requestExpires)
+
+	cBytes, err := exec.Command(oracleBin, "replay", inputPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("C oracle failed: %v\n%s", err, cBytes)
+	}
+	cTranscript := string(cBytes)
+	goTranscript := replayTranscript(t, keepAlive, requests, requestExpires)
+
+	if cTranscript != goTranscript {
+		cLines := strings.Split(cTranscript, "\n")
+		gLines := strings.Split(goTranscript, "\n")
+		for i := 0; i < len(cLines) && i < len(gLines); i++ {
+			if cLines[i] != gLines[i] {
+				t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+				break
+			}
+		}
+		t.Errorf("C and Go replay transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
+	}
+}
+
 // sharedConnectionResponseTokens fixes the keys, nonces, timestamp, identities
 // and user data. The exact serialized tokens are passed to both scripts.
 func sharedConnectionResponseTokens(t *testing.T) [3][]byte {

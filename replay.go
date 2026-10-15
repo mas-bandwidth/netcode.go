@@ -20,6 +20,13 @@ func (r *replayProtection) alreadyReceived(sequence uint64) bool {
 	// written so it cannot overflow: "sequence + BUFFER_SIZE <= most_recent" wraps for
 	// sequence values near the top of the sequence space and falsely rejects them as replays
 
+	// UINT64_MAX is also the empty-slot marker, so a packet at that sequence must never
+	// read as not-yet-received: it is always received.
+
+	if sequence == 0xFFFFFFFFFFFFFFFF {
+		return true
+	}
+
 	if r.mostRecentSequence >= replayProtectionBufferSize &&
 		sequence <= r.mostRecentSequence-replayProtectionBufferSize {
 		return true
