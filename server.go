@@ -62,7 +62,8 @@ type ServerConfig struct {
 
 	// OverrideSendAndReceive replaces socket send and receive with the
 	// SendPacketOverride and ReceivePacketOverride callbacks. No sockets are
-	// created.
+	// created. When set, both SendPacketOverride and ReceivePacketOverride
+	// must be non-nil, or create is refused.
 	OverrideSendAndReceive bool
 	SendPacketOverride     func(to *Address, packetData []byte)
 
@@ -153,6 +154,11 @@ func NewServerDual(serverAddress1String string, serverAddress2String string, con
 		configCopy.MaxConnectTokenLifetime = DefaultMaxConnectTokenLifetime
 	}
 	config = &configCopy
+
+	if config.OverrideSendAndReceive && (config.SendPacketOverride == nil || config.ReceivePacketOverride == nil) {
+		printf(LogLevelError, "override_send_and_receive requires both send_packet_override and receive_packet_override\n")
+		return nil, ErrServerMissingOverrideCallback
+	}
 
 	serverAddress1, err := ParseAddress(serverAddress1String)
 	if err != nil {
