@@ -7,11 +7,12 @@ import (
 
 // Client create errors, returned from NewClient and NewClientDual.
 var (
-	ErrClientParseAddressFailed     = errors.New("netcode: failed to parse client address")
-	ErrClientParseAddress2Failed    = errors.New("netcode: failed to parse client address2")
-	ErrClientSimulatorRequiresPort  = errors.New("netcode: must bind to a specific port when using network simulator")
-	ErrClientCreateSocketIPv4Failed = errors.New("netcode: failed to create client ipv4 socket")
-	ErrClientCreateSocketIPv6Failed = errors.New("netcode: failed to create client ipv6 socket")
+	ErrClientParseAddressFailed      = errors.New("netcode: failed to parse client address")
+	ErrClientParseAddress2Failed     = errors.New("netcode: failed to parse client address2")
+	ErrClientSimulatorRequiresPort   = errors.New("netcode: must bind to a specific port when using network simulator")
+	ErrClientCreateSocketIPv4Failed  = errors.New("netcode: failed to create client ipv4 socket")
+	ErrClientCreateSocketIPv6Failed  = errors.New("netcode: failed to create client ipv6 socket")
+	ErrClientMissingOverrideCallback = errors.New("netcode: override_send_and_receive requires both send_packet_override and receive_packet_override")
 )
 
 // ClientConfig configures a Client. The zero value gives working defaults:
@@ -30,7 +31,8 @@ type ClientConfig struct {
 
 	// OverrideSendAndReceive replaces socket send and receive with the
 	// SendPacketOverride and ReceivePacketOverride callbacks. No sockets are
-	// created.
+	// created. When set, both SendPacketOverride and ReceivePacketOverride
+	// must be non-nil, or create is refused.
 	OverrideSendAndReceive bool
 	SendPacketOverride     func(to *Address, packetData []byte)
 
@@ -106,6 +108,11 @@ func NewClientDual(address1String string, address2String string, config *ClientC
 		configCopy = *config
 	}
 	config = &configCopy
+
+	if config.OverrideSendAndReceive && (config.SendPacketOverride == nil || config.ReceivePacketOverride == nil) {
+		printf(LogLevelError, "override_send_and_receive requires both send_packet_override and receive_packet_override\n")
+		return nil, ErrClientMissingOverrideCallback
+	}
 
 	address1, err := ParseAddress(address1String)
 	if err != nil {

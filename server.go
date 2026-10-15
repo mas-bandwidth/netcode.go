@@ -9,12 +9,13 @@ import (
 // failures are reported separately from other socket errors because a port
 // already in use is the common operational failure for dedicated servers.
 var (
-	ErrServerParseAddressFailed     = errors.New("netcode: failed to parse server public address")
-	ErrServerParseAddress2Failed    = errors.New("netcode: failed to parse server public address2")
-	ErrServerCreateSocketIPv4Failed = errors.New("netcode: failed to create server ipv4 socket")
-	ErrServerCreateSocketIPv6Failed = errors.New("netcode: failed to create server ipv6 socket")
-	ErrServerBindSocketIPv4Failed   = errors.New("netcode: failed to bind server ipv4 socket")
-	ErrServerBindSocketIPv6Failed   = errors.New("netcode: failed to bind server ipv6 socket")
+	ErrServerParseAddressFailed      = errors.New("netcode: failed to parse server public address")
+	ErrServerParseAddress2Failed     = errors.New("netcode: failed to parse server public address2")
+	ErrServerCreateSocketIPv4Failed  = errors.New("netcode: failed to create server ipv4 socket")
+	ErrServerCreateSocketIPv6Failed  = errors.New("netcode: failed to create server ipv6 socket")
+	ErrServerBindSocketIPv4Failed    = errors.New("netcode: failed to bind server ipv4 socket")
+	ErrServerBindSocketIPv6Failed    = errors.New("netcode: failed to bind server ipv6 socket")
+	ErrServerMissingOverrideCallback = errors.New("netcode: override_send_and_receive requires both send_packet_override and receive_packet_override")
 )
 
 // Server flags.
@@ -61,7 +62,8 @@ type ServerConfig struct {
 
 	// OverrideSendAndReceive replaces socket send and receive with the
 	// SendPacketOverride and ReceivePacketOverride callbacks. No sockets are
-	// created.
+	// created. When set, both SendPacketOverride and ReceivePacketOverride
+	// must be non-nil, or create is refused.
 	OverrideSendAndReceive bool
 	SendPacketOverride     func(to *Address, packetData []byte)
 
@@ -152,6 +154,11 @@ func NewServerDual(serverAddress1String string, serverAddress2String string, con
 		configCopy.MaxConnectTokenLifetime = DefaultMaxConnectTokenLifetime
 	}
 	config = &configCopy
+
+	if config.OverrideSendAndReceive && (config.SendPacketOverride == nil || config.ReceivePacketOverride == nil) {
+		printf(LogLevelError, "override_send_and_receive requires both send_packet_override and receive_packet_override\n")
+		return nil, ErrServerMissingOverrideCallback
+	}
 
 	serverAddress1, err := ParseAddress(serverAddress1String)
 	if err != nil {

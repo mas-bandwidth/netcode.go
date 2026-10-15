@@ -625,6 +625,116 @@ static int oracle_loopback_main( void )
     return 0;
 }
 
+/*
+    Override callbacks required mode.
+
+    Drives the C server and client create path with override_send_and_receive
+    set and one, neither or both override callbacks, and prints one line per
+    case:
+
+        <client|server> <send|receive|neither|both> -> <refused|created>
+
+    The C reference refuses to create when override_send_and_receive is set and
+    either the send or receive callback is missing, so a NULL create prints
+    "refused"; a non-NULL create prints "created". The Go port must match byte
+    for byte.
+
+    Input file (all integers little endian):
+
+        uint32 case_count
+        then, per case:
+            uint32 side       // 0 = server, 1 = client
+            uint32 which      // 0 = send, 1 = receive, 2 = neither, 3 = both
+
+    The create calls must match the C checkout named by NETCODE_C_DIR; this
+    leg is unverified without one.
+*/
+
+static void oracle_override_send( void * context, struct netcode_address_t * to,
+                                  NETCODE_CONST uint8_t * packet_data, int packet_bytes )
+{
+    (void) context;
+    (void) to;
+    (void) packet_data;
+    (void) packet_bytes;
+}
+
+static int oracle_override_receive( void * context, struct netcode_address_t * from,
+                                    uint8_t * packet_data, int max_packet_size )
+{
+    (void) context;
+    (void) from;
+    (void) packet_data;
+    (void) max_packet_size;
+    return 0;
+}
+
+static const char * oracle_override_name( uint32_t which )
+{
+    switch ( which )
+    {
+        case 0: return "send";
+        case 1: return "receive";
+        case 2: return "neither";
+        default: return "both";
+    }
+}
+
+static int oracle_override_main( const char * path )
+{
+    FILE * f = fopen( path, "rb" );
+    uint32_t case_count, c;
+    if ( !f )
+    {
+        fprintf( stderr, "oracle: could not open %s\n", path );
+        return 1;
+    }
+    if ( netcode_init() != NETCODE_OK )
+    {
+        fprintf( stderr, "oracle: netcode_init failed\n" );
+        fclose( f );
+        return 1;
+    }
+    case_count = read_u32( f );
+    for ( c = 0; c < case_count; c++ )
+    {
+        uint32_t side = read_u32( f );
+        uint32_t which = read_u32( f );
+        const char * name = oracle_override_name( which );
+        if ( side == 1 )
+        {
+            struct netcode_client_config_t config;
+            struct netcode_client_t * client;
+            memset( &config, 0, sizeof( config ) );
+            config.override_send_and_receive = 1;
+            if ( which == 0 || which == 3 ) config.send_packet_override = oracle_override_send;
+            if ( which == 1 || which == 3 ) config.receive_packet_override = oracle_override_receive;
+            client = netcode_client_create( "127.0.0.1:41000", &config, 0.0 );
+            printf( "client %s -> %s\n", name, client ? "created" : "refused" );
+            if ( client ) netcode_client_destroy( client );
+        }
+        else
+        {
+            struct netcode_server_config_t config;
+            struct netcode_server_t * server;
+            uint8_t private_key[NETCODE_KEY_BYTES];
+            memset( &config, 0, sizeof( config ) );
+            oracle_private_key( private_key );
+            config.protocol_id = ORACLE_PROTOCOL_ID;
+            memcpy( config.private_key, private_key, NETCODE_KEY_BYTES );
+            config.override_send_and_receive = 1;
+            if ( which == 0 || which == 3 ) config.send_packet_override = oracle_override_send;
+            if ( which == 1 || which == 3 ) config.receive_packet_override = oracle_override_receive;
+            server = netcode_server_create( "127.0.0.1:40000", &config, 0.0 );
+            printf( "server %s -> %s\n", name, server ? "created" : "refused" );
+            if ( server ) netcode_server_destroy( server );
+        }
+    }
+    fclose( f );
+    netcode_term();
+    return 0;
+}
+
 int main( int argc, char ** argv )
 {
     FILE * f;
@@ -639,6 +749,10 @@ int main( int argc, char ** argv )
     if ( argc == 3 && strcmp( argv[1], "receive" ) == 0 )
     {
         return oracle_receive_main( argv[2] );
+    }
+    if ( argc == 3 && strcmp( argv[1], "override" ) == 0 )
+    {
+        return oracle_override_main( argv[2] );
     }
     if ( argc == 4 && strcmp( argv[1], "challenge" ) == 0 )
     {

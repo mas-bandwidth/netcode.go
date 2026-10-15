@@ -289,6 +289,7 @@ func receiveDrainTranscript(cases []receiveDrainCase) string {
 				ProtocolID:             testProtocolID,
 				PrivateKey:             testPrivateKey,
 				OverrideSendAndReceive: true,
+				SendPacketOverride:     func(*Address, []byte) {},
 				ReceivePacketOverride:  override,
 			}, 0)
 			if err != nil {
@@ -300,6 +301,7 @@ func receiveDrainTranscript(cases []receiveDrainCase) string {
 		} else {
 			client, err := NewClient("127.0.0.1:41000", &ClientConfig{
 				OverrideSendAndReceive: true,
+				SendPacketOverride:     func(*Address, []byte) {},
 				ReceivePacketOverride:  override,
 			}, 0)
 			if err != nil {
@@ -428,6 +430,8 @@ func globalSequenceTranscript() string {
 			ProtocolID:             testProtocolID,
 			PrivateKey:             testPrivateKey,
 			OverrideSendAndReceive: true,
+			SendPacketOverride:     func(*Address, []byte) {},
+			ReceivePacketOverride:  func() ([]byte, Address, int) { return nil, Address{}, 0 },
 		}, 0.0)
 		if err != nil {
 			return nil
@@ -518,6 +522,8 @@ func loopbackTranscript() string {
 		ProtocolID:             testProtocolID,
 		PrivateKey:             testPrivateKey,
 		OverrideSendAndReceive: true,
+		SendPacketOverride:     func(*Address, []byte) {},
+		ReceivePacketOverride:  func() ([]byte, Address, int) { return nil, Address{}, 0 },
 	}, 0.0)
 	if err != nil {
 		return ""
@@ -526,6 +532,8 @@ func loopbackTranscript() string {
 
 	client, err := NewClient("127.0.0.1:41000", &ClientConfig{
 		OverrideSendAndReceive: true,
+		SendPacketOverride:     func(*Address, []byte) {},
+		ReceivePacketOverride:  func() ([]byte, Address, int) { return nil, Address{}, 0 },
 	}, 0.0)
 	if err != nil {
 		return ""
@@ -598,6 +606,188 @@ func TestCDifferentialLoopback(t *testing.T) {
 		}
 		t.Errorf("C and Go loopback transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
 	}
+}
+
+// overrideCallbacksCase is one create-time override callback configuration.
+type overrideCallbacksCase struct {
+	side  string // "server" or "client"
+	which string // "send", "receive", "neither" or "both"
+}
+
+// overrideCallbacksCases mirrors the C oracle's override mode: all four
+// callback combinations on both sides.
+func overrideCallbacksCases() []overrideCallbacksCase {
+	return []overrideCallbacksCase{
+		{"client", "send"},
+		{"client", "receive"},
+		{"client", "neither"},
+		{"client", "both"},
+		{"server", "send"},
+		{"server", "receive"},
+		{"server", "neither"},
+		{"server", "both"},
+	}
+}
+
+// overrideCallbacksTranscript runs the port's create path with
+// OverrideSendAndReceive set and the named callbacks, printing one line per
+// case in the oracle's form. A create refused with the missing-callback error
+// prints "refused"; a successful create prints "created" and closes cleanly.
+func overrideCallbacksTranscript(cases []overrideCallbacksCase) string {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() ([]byte, Address, int) { return nil, Address{}, 0 }
+
+	var out strings.Builder
+	for _, c := range cases {
+		if c.side == "server" {
+			cfg := &ServerConfig{
+				ProtocolID:             testProtocolID,
+				PrivateKey:             testPrivateKey,
+				OverrideSendAndReceive: true,
+			}
+			switch c.which {
+			case "send":
+				cfg.SendPacketOverride = send
+			case "receive":
+				cfg.ReceivePacketOverride = receive
+			case "both":
+				cfg.SendPacketOverride = send
+				cfg.ReceivePacketOverride = receive
+			}
+			server, err := NewServer("127.0.0.1:40000", cfg, 0)
+			if err != nil {
+				fmt.Fprintf(&out, "%s %s -> refused\n", c.side, c.which)
+			} else {
+				fmt.Fprintf(&out, "%s %s -> created\n", c.side, c.which)
+				server.Close()
+			}
+		} else {
+			cfg := &ClientConfig{OverrideSendAndReceive: true}
+			switch c.which {
+			case "send":
+				cfg.SendPacketOverride = send
+			case "receive":
+				cfg.ReceivePacketOverride = receive
+			case "both":
+				cfg.SendPacketOverride = send
+				cfg.ReceivePacketOverride = receive
+			}
+			client, err := NewClient("127.0.0.1:41000", cfg, 0)
+			if err != nil {
+				fmt.Fprintf(&out, "%s %s -> refused\n", c.side, c.which)
+			} else {
+				fmt.Fprintf(&out, "%s %s -> created\n", c.side, c.which)
+				client.Close()
+			}
+		}
+	}
+	return out.String()
+}
+
+// writeOverrideCallbacksInputs writes the framed input file the oracle's
+// "override" mode reads: a uint32 case count, then per case a uint32 side (0
+// server, 1 client) and a uint32 which (0 send, 1 receive, 2 neither, 3 both).
+func writeOverrideCallbacksInputs(t *testing.T, path string, cases []overrideCallbacksCase) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	writeU32 := func(v uint32) {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], v)
+		buf.Write(b[:])
+	}
+
+	writeU32(uint32(len(cases)))
+	for _, c := range cases {
+		if c.side == "client" {
+			writeU32(1)
+		} else {
+			writeU32(0)
+		}
+		switch c.which {
+		case "send":
+			writeU32(0)
+		case "receive":
+			writeU32(1)
+		case "neither":
+			writeU32(2)
+		case "both":
+			writeU32(3)
+		}
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("failed to write override callbacks inputs: %v", err)
+	}
+}
+
+// TestCDifferentialOverrideCallbacks compares the port's create-time refusal of
+// an incomplete override configuration against the C reference on the same
+// four callback combinations. Each side prints
+//
+//	<client|server> <send|receive|neither|both> -> <refused|created>
+//
+// and the test compares the transcripts byte for byte. It is a functional test
+// on fixed bytes with no socket and no clock, gated on NETCODE_C_DIR so the
+// hermetic unit gate skips it. Run with:
+//
+//	NETCODE_C_DIR=<checkout> go test -count=1 -run TestCDifferentialOverrideCallbacks .
+func TestCDifferentialOverrideCallbacks(t *testing.T) {
+	cDir := os.Getenv("NETCODE_C_DIR")
+	if cDir == "" {
+		t.Skip("set NETCODE_C_DIR to a C reference checkout (mas-bandwidth/netcode, branch sprint/netcode-audit-fixes at or after fbefafb2) to run the override callbacks differential test")
+	}
+	if _, err := os.Stat(filepath.Join(cDir, "netcode.c")); err != nil {
+		t.Fatalf("NETCODE_C_DIR does not contain netcode.c: %v", err)
+	}
+
+	tmp := t.TempDir()
+	oracleBin := filepath.Join(tmp, "oracle")
+	oracleSrc := filepath.Join("testdata", "c", "oracle.c")
+	sodiumSrc := filepath.Join(cDir, "sodium", "sodium.c")
+
+	build := exec.Command("cc", "-O2", "-ffp-contract=off",
+		"-I", cDir, "-I", filepath.Join(cDir, "sodium"),
+		"-o", oracleBin, oracleSrc, sodiumSrc, "-lm")
+	var buildOut bytes.Buffer
+	build.Stdout = &buildOut
+	build.Stderr = &buildOut
+	if err := build.Run(); err != nil {
+		t.Fatalf("failed to build oracle: %v\n%s", err, buildOut.String())
+	}
+
+	cases := overrideCallbacksCases()
+	inputFile := filepath.Join(tmp, "override_inputs.bin")
+	writeOverrideCallbacksInputs(t, inputFile, cases)
+
+	oracle := exec.Command(oracleBin, "override", inputFile)
+	var oracleOut bytes.Buffer
+	oracle.Stdout = &oracleOut
+	oracle.Stderr = &oracleOut
+	if err := oracle.Run(); err != nil {
+		t.Fatalf("oracle failed: %v\n%s", err, oracleOut.String())
+	}
+
+	cTranscript := oracleOut.String()
+	goTranscript := overrideCallbacksTranscript(cases)
+
+	if cTranscript == goTranscript {
+		return
+	}
+
+	cLines := strings.Split(cTranscript, "\n")
+	gLines := strings.Split(goTranscript, "\n")
+	n := len(cLines)
+	if len(gLines) < n {
+		n = len(gLines)
+	}
+	for i := 0; i < n; i++ {
+		if cLines[i] != gLines[i] {
+			t.Errorf("first differing line %d:\n  C:  %q\n  Go: %q", i+1, cLines[i], gLines[i])
+			break
+		}
+	}
+	t.Errorf("C and Go override callbacks transcripts differ\n--- C ---\n%s--- Go ---\n%s", cTranscript, goTranscript)
 }
 
 // sharedConnectionResponseTokens fixes the keys, nonces, timestamp, identities

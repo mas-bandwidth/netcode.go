@@ -1043,6 +1043,7 @@ func TestReceiveDrainSkipsEmptyAndStopsAtCap(t *testing.T) {
 		ProtocolID:             testProtocolID,
 		PrivateKey:             testPrivateKey,
 		OverrideSendAndReceive: true,
+		SendPacketOverride:     func(*Address, []byte) {},
 		ReceivePacketOverride:  override,
 	}, 0)
 	check(t, err == nil)
@@ -1059,6 +1060,7 @@ func TestReceiveDrainSkipsEmptyAndStopsAtCap(t *testing.T) {
 		ProtocolID:             testProtocolID,
 		PrivateKey:             testPrivateKey,
 		OverrideSendAndReceive: true,
+		SendPacketOverride:     func(*Address, []byte) {},
 		ReceivePacketOverride:  override,
 	}, 0)
 	check(t, err == nil)
@@ -1076,6 +1078,7 @@ func TestReceiveDrainSkipsEmptyAndStopsAtCap(t *testing.T) {
 	clientOverride, clientCalls := scriptedReceive(clientSaturated)
 	client, err := NewClient("127.0.0.1:41000", &ClientConfig{
 		OverrideSendAndReceive: true,
+		SendPacketOverride:     func(*Address, []byte) {},
 		ReceivePacketOverride:  clientOverride,
 	}, 0)
 	check(t, err == nil)
@@ -1088,6 +1091,7 @@ func TestReceiveDrainSkipsEmptyAndStopsAtCap(t *testing.T) {
 	clientOverride, clientCalls = scriptedReceive([][]byte{junk, nil, junk})
 	client, err = NewClient("127.0.0.1:41001", &ClientConfig{
 		OverrideSendAndReceive: true,
+		SendPacketOverride:     func(*Address, []byte) {},
 		ReceivePacketOverride:  clientOverride,
 	}, 0)
 	check(t, err == nil)
