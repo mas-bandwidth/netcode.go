@@ -24,7 +24,7 @@ func TestClientReconnectWithUsedConnectToken(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerInThePast(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -80,7 +80,7 @@ func TestClientRefusesAReusedConnectToken(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerInThePast(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -148,8 +148,13 @@ func TestClientConnectTokenPredatesServerStart(t *testing.T) {
 	check(t, client.State() == ClientStateConnectionRequestTimedOut)
 	check(t, server.NumConnectedClients() == 0)
 
-	// a connect token with the full lifetime connects
-	validToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry+5, testTimeoutSeconds, randomUint64())
+	// restart the server one maximum lifetime earlier so a full-lifetime token
+	// minted now is strictly after the server start and clears the restart floor;
+	// a connect token with the maximum lifetime connects (a longer lifetime is
+	// refused as over-long)
+	startServerInThePast(server, 1)
+
+	validToken := generateTestConnectToken(t, "[::1]:40000", DefaultMaxConnectTokenLifetime, testTimeoutSeconds, randomUint64())
 
 	client.Connect(validToken)
 
@@ -157,6 +162,116 @@ func TestClientConnectTokenPredatesServerStart(t *testing.T) {
 
 	check(t, client.State() == ClientStateConnected)
 	check(t, server.NumConnectedClients() == 1)
+}
+
+// craftConnectionRequest builds a valid connection request packet for the given
+// timeout and expire timestamp, with keys and nonce drawn from the fixed
+// connectionResponseTimestamp so the server side can be driven with explicit
+// time and no wall clock.
+func craftConnectionRequest(t *testing.T, timeoutSeconds int32, expireTimestamp uint64) *connectionRequest {
+	t.Helper()
+
+	address, err := ParseAddress("[::1]:40000")
+	check(t, err == nil)
+
+	private := connectTokenPrivate{
+		clientID:           randomUint64(),
+		timeoutSeconds:     timeoutSeconds,
+		numServerAddresses: 1,
+	}
+	private.serverAddresses[0] = address
+	RandomBytes(private.clientToServerKey[:])
+	RandomBytes(private.serverToClientKey[:])
+
+	token := connectToken{
+		protocolID:         testProtocolID,
+		createTimestamp:    connectionResponseTimestamp,
+		expireTimestamp:    expireTimestamp,
+		timeoutSeconds:     timeoutSeconds,
+		numServerAddresses: 1,
+		clientToServerKey:  private.clientToServerKey,
+		serverToClientKey:  private.serverToClientKey,
+	}
+	token.serverAddresses[0] = address
+	RandomBytes(token.nonce[:])
+	private.write(token.privateData[:])
+	check(t, encryptConnectTokenPrivate(token.privateData[:], token.protocolID, token.expireTimestamp, token.nonce[:], testPrivateKey[:]) == nil)
+
+	return &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  token.protocolID,
+		connectTokenExpireTimestamp: token.expireTimestamp,
+		connectTokenNonce:           token.nonce,
+		connectTokenData:            token.privateData,
+	}
+}
+
+func TestPreconnectMappingExpiresWithNonpositiveTimeout(t *testing.T) {
+	from, err := ParseAddress("[::1]:50000")
+	check(t, err == nil)
+
+	newServer := func() *Server {
+		server, err := NewServer("[::1]:40000", &ServerConfig{
+			ProtocolID:             testProtocolID,
+			PrivateKey:             testPrivateKey,
+			OverrideSendAndReceive: true,
+			SendPacketOverride:     func(*Address, []byte) {},
+			ReceivePacketOverride:  func() ([]byte, Address, int) { return nil, Address{}, 0 },
+		}, 0)
+		check(t, err == nil)
+		server.startAt(1, connectionResponseTimestamp-DefaultMaxConnectTokenLifetime)
+		return server
+	}
+
+	// a request with a negative timeout must not hold an encryption-mapping slot
+	// forever: the pre-connect mapping expires after preconnectMappingSeconds
+	server := newServer()
+	defer server.Close()
+
+	request := craftConnectionRequest(t, -1, connectionResponseTimestamp+DefaultMaxConnectTokenLifetime)
+	var raw [maxPacketBytes]byte
+	n := writePacket(request, raw[:], 0, nil, testProtocolID)
+	server.processPacketAt(&from, raw[:n], connectionResponseTimestamp)
+	check(t, server.encryptionManager.findEncryptionMapping(&from, server.time) != -1)
+
+	server.Update(11.0)
+	check(t, server.encryptionManager.findEncryptionMapping(&from, server.time) == -1)
+
+	// a request with a zero timeout must still connect when its response arrives
+	// one update later, rather than expiring before the response can be sent
+	var sent []lifetimeSentPacket
+	zeroServer := lifetimeServer(t, &sent)
+	defer zeroServer.Close()
+
+	zeroRequest, clientToServerKey, serverToClientKey := lifetimeConnectToken(t, 0, tokenLifetimeTimestamp+DefaultMaxConnectTokenLifetime)
+	n = writePacket(zeroRequest, raw[:], 0, nil, testProtocolID)
+	zeroServer.time = 0.0
+	zeroServer.processPacketAt(&from, raw[:n], tokenLifetimeTimestamp)
+
+	challenge, ok := lifetimeFindChallenge(sent, &from, serverToClientKey)
+	check(t, ok)
+
+	zeroServer.time = 0.1
+	response := &connectionResponse{
+		challengeTokenSequence: challenge.challengeTokenSequence,
+		challengeTokenData:     challenge.challengeTokenData,
+	}
+	n = writePacket(response, raw[:], 1, clientToServerKey[:], testProtocolID)
+	zeroServer.processPacketAt(&from, raw[:n], tokenLifetimeTimestamp)
+	check(t, zeroServer.NumConnectedClients() == 1)
+}
+
+func TestNeverExpiringTokenIsRefused(t *testing.T) {
+	t.Parallel()
+
+	const maxLifetime = uint64(DefaultMaxConnectTokenLifetime)
+	current := uint64(connectionResponseTimestamp)
+
+	check(t, connectTokenExpireTimestampExceedsLifetime(^uint64(0), current, maxLifetime))
+	check(t, connectTokenExpireTimestampExceedsLifetime(current+2*maxLifetime, current, maxLifetime))
+	check(t, connectTokenExpireTimestampExceedsLifetime(current+maxLifetime+1, current, maxLifetime))
+	check(t, !connectTokenExpireTimestampExceedsLifetime(current+maxLifetime, current, maxLifetime))
+	check(t, !connectTokenExpireTimestampExceedsLifetime(current+1, current, maxLifetime))
 }
 
 func TestConnectTokenHistoryFullServerRefusal(t *testing.T) {
@@ -197,7 +312,7 @@ func TestConnectTokenHistoryFullServerRefusal(t *testing.T) {
 	check(t, err == nil)
 	defer client.Close()
 
-	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry+10, testTimeoutSeconds, randomUint64())
+	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 	client.Connect(connectToken)
 
 	for client.State() > ClientStateDisconnected && client.State() != ClientStateConnected {

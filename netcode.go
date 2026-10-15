@@ -88,6 +88,14 @@ var versionInfo = [versionInfoBytes]byte{'N', 'E', 'T', 'C', 'O', 'D', 'E', ' ',
 const (
 	packetSendRate       = 10.0
 	numDisconnectPackets = 10
+
+	// preconnectMappingSeconds is the bounded lifetime of a pre-connect
+	// encryption mapping, mirroring NETCODE_PRECONNECT_MAPPING_SECONDS in the C
+	// reference. A pre-connect mapping lives this long when the connect token's
+	// timeout is non-positive, so a request that is never answered cannot hold
+	// an encryption-mapping slot forever, and a zero-timeout request still has
+	// time for its response to arrive.
+	preconnectMappingSeconds = 10.0
 )
 
 // Client states. The initial state is ClientStateDisconnected. Negative states

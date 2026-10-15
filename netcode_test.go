@@ -13,7 +13,7 @@ const (
 	testProtocolID         = 0x1122334455667788
 	testClientID           = 0x1
 	testServerPort         = 40000
-	testConnectTokenExpiry = 60
+	testConnectTokenExpiry = 30
 	testTimeoutSeconds     = 15
 )
 
