@@ -27,6 +27,14 @@
    :origin "mas-bandwidth/netcode.go issue #22, opened 2026-08-26 by rowan-claude; moved here 2026-10-14"
    :kept (:github-issue "22" :labels ""))
 
+  (item "go-netcode-connection-response-takes-only-its-own-mappings-challenge" :group "export-netcode-go-port" :area "netcode.go"
+   :title "Bind connection responses to their own mapping challenge"
+   :text "Bind connection challenges to the connect token that created the server's encryption mapping. Previously, a response encrypted under token B's packet key could carry token A's challenge and connect as A with A's user data. The server now authenticates each challenge with that token's private-data MAC and refuses a response when its mapping has no token entry."
+   :exists "Work was pushed: head b8e0d18a76519cd5e1e8ec4f9126b8de39ab4710 on branch sprint/go-netcode-connection-response-takes-only-its-own-mappings-challenge.w1.g1.e20, open as draft pull request #31. Resume from it; do not start over."
+   :why "Moved out of the stopped sprint on 2026-10-14: neither rocketnet nor v1.3 work."
+   :date "2026-10-14"
+   :origin "mas-bandwidth/netcode.go pull request #31 (draft), opened 2026-10-14 by gafferongames, for sprint card go-netcode-connection-response-takes-only-its-own-mappings-challenge (stream netcode-go-port, base sprint/netcode-go-port); added here 2026-10-16"
+   :kept (:github-pr "31" :labels "" :sprint-card "go-netcode-connection-response-takes-only-its-own-mappings-challenge" :sprint-stream "netcode-go-port" :sprint-base "sprint/netcode-go-port" :pushed-head "b8e0d18a76519cd5e1e8ec4f9126b8de39ab4710" :pushed-branch "sprint/go-netcode-connection-response-takes-only-its-own-mappings-challenge.w1.g1.e20"))
   (item "go-netcode-disconnect-callback-cannot-reenter-a-clearing-slot" :group "export-netcode-go-port" :area "netcode.go"
    :title "Go netcode disconnect callback cannot reenter a clearing slot"
    :text "disconnectClientInternal (server.go:353-380) calls ConnectDisconnectCallback at 360-362 before `server.encryptionManager.clientIndex[server.clientEncryptionIndex[clientIndex]] = -1` (375) and resetClientSlot (379)."

@@ -7,7 +7,7 @@ Planned work for netcode.go. Each item below was an open sprint card, moved out 
 ## Contents
 
 - [Moved from GitHub issues on 2026-10-14](#moved-from-github-issues-on-2026-10-14) (1)
-- [Moved out of the sprint on 2026-10-14: netcode-go-port](#moved-out-of-the-sprint-on-2026-10-14-netcode-go-port) (6)
+- [Moved out of the sprint on 2026-10-14: netcode-go-port](#moved-out-of-the-sprint-on-2026-10-14-netcode-go-port) (7)
 
 ## Moved from GitHub issues on 2026-10-14
 
@@ -22,6 +22,16 @@ From: mas-bandwidth/netcode.go issue #22, opened 2026-08-26 by rowan-claude; mov
 ## Moved out of the sprint on 2026-10-14: netcode-go-port
 
 The open cards of sprint stream netcode-go-port, moved out of the stopped sprint on 2026-10-14, one item per card. Landed cards of the stream are in git and are not listed. Each item names its card, its tier, its base branch and any pushed work to resume from.
+
+### Bind connection responses to their own mapping challenge
+
+Bind connection challenges to the connect token that created the server's encryption mapping. Previously, a response encrypted under token B's packet key could carry token A's challenge and connect as A with A's user data. The server now authenticates each challenge with that token's private-data MAC and refuses a response when its mapping has no token entry.
+
+Already in the code: Work was pushed: head b8e0d18a76519cd5e1e8ec4f9126b8de39ab4710 on branch sprint/go-netcode-connection-response-takes-only-its-own-mappings-challenge.w1.g1.e20, open as draft pull request #31. Resume from it; do not start over.
+
+Why it waits: Moved out of the stopped sprint on 2026-10-14: neither rocketnet nor v1.3 work.
+
+From: mas-bandwidth/netcode.go pull request #31 (draft), opened 2026-10-14 by gafferongames, for sprint card go-netcode-connection-response-takes-only-its-own-mappings-challenge (stream netcode-go-port, base sprint/netcode-go-port); added here 2026-10-16
 
 ### Go netcode disconnect callback cannot reenter a clearing slot
 
