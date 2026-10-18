@@ -4,6 +4,31 @@
 
 Planned work for netcode.go. Each item below was an open sprint card, moved out of the stopped sprint on 2026-10-14; it names its card, its tier, its base branch and any pushed work to resume from. Landed work is in git.
 
+## At a glance
+
+Generated from the same data as the tables below.
+
+```mermaid
+pie title Items by group
+    "Moved from GitHub issues on 2026-10-14" : 1
+    "Moved out of the sprint on 2026-10-14: netcode-go-port" : 7
+```
+
+```mermaid
+mindmap
+  root(("netcode.go roadmap"))
+    g1["Moved from GitHub issues on 2026-10-14 (1)"]
+      g1i1["VersionFull pins 1.4.3, upstream netcode is now 1.4.4"]
+    g2["Moved out of the sprint on 2026-10-14: netcode-go-port (7)"]
+      g2i1["Bind connection responses to their own mapping challenge"]
+      g2i2["Go netcode disconnect callback cannot reenter a clearing slot"]
+      g2i3["Go netcode replay top sequence and restart floor edges"]
+      g2i4["Go netcode token lifetimes are bounded"]
+      g2i5["Go netcode client refuses a server address it has no socket for"]
+      g2i6["Go netcode global packet nonces differ between servers sharing a token"]
+      g2i7["Go netcode loopback callback is required"]
+```
+
 ## Contents
 
 - [Moved from GitHub issues on 2026-10-14](#moved-from-github-issues-on-2026-10-14) (1)
