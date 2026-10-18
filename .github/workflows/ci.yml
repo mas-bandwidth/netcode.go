@@ -243,3 +243,13 @@ jobs:
           check PATCH "$(up_num PATCH)" "$(our_num Patch)"
 
           exit $fail
+
+  roadmap:
+    name: ROADMAP.md matches docs/roadmap.sexp
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 'stable'
+      - run: make roadmap-check
