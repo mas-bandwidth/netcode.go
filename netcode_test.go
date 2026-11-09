@@ -1029,6 +1029,43 @@ func TestRuntimeGuards(t *testing.T) {
 	check(t, server.NumConnectedClients() == 0)
 }
 
+func TestConnectLoopbackClientRequiresSendLoopbackPacketCallback(t *testing.T) {
+	// a loopback connection needs a send callback, so without one it must be
+	// refused rather than accepted in a half-connected state
+
+	serverConfig := &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true}
+
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 1000.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	server.ConnectLoopbackClient(0, testClientID, nil)
+
+	server.SendPacket(0, []byte{1})
+
+	check(t, !server.ClientLoopback(0))
+	check(t, !server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 0)
+}
+
+func TestConnectLoopbackRequiresSendLoopbackPacketCallback(t *testing.T) {
+	// a loopback connection needs a send callback, so without one the client
+	// must stay disconnected
+
+	client, err := NewClient("127.0.0.1:50000", &ClientConfig{OverrideSendAndReceive: true}, 1000.0)
+	check(t, err == nil)
+	defer client.Close()
+
+	client.ConnectLoopback(0, 1)
+
+	client.SendPacket([]byte{1})
+
+	check(t, !client.Loopback())
+	check(t, client.State() == ClientStateDisconnected)
+}
+
 func TestInitAndDefaults(t *testing.T) {
 	// a nil config must give working defaults instead of crashing
 
