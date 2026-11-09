@@ -202,7 +202,6 @@ func (client *Client) setState(clientState int) {
 }
 
 func (client *Client) resetBeforeNextConnect() {
-	client.connectStartTime = client.time
 	client.lastPacketSendTime = client.time - 1.0
 	client.lastPacketReceiveTime = client.time
 	client.shouldDisconnect = false
@@ -258,6 +257,8 @@ func (client *Client) Connect(connectTokenData []byte) {
 	client.hasPacketKeys = true
 
 	client.resetBeforeNextConnect()
+
+	client.connectStartTime = client.time
 
 	client.setState(ClientStateSendingConnectionRequest)
 }
