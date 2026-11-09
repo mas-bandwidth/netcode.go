@@ -1452,7 +1452,7 @@ func TestClientServerSocketReceiveBurst(t *testing.T) {
 
 	sender, err := net.Dial("udp4", serverAddress)
 	check(t, err == nil)
-	defer sender.Close()
+	defer func() { _ = sender.Close() }()
 
 	for i := 0; i < 2000; i++ {
 		_, err = sender.Write([]byte{0})
