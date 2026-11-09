@@ -949,7 +949,7 @@ func TestServerSideDisconnect(t *testing.T) {
 func TestDisconnectCallbackCanStopServer(t *testing.T) {
 	simulator := NewNetworkSimulator()
 
-	currentTime := 0.0
+	currentTime := 1000.0
 	deltaTime := 1.0 / 10.0
 
 	clientConfig := &ClientConfig{NetworkSimulator: simulator}
@@ -1003,7 +1003,7 @@ func TestDisconnectCallbackCanStopServer(t *testing.T) {
 func TestDisconnectCallbackCanDisconnectClient(t *testing.T) {
 	simulator := NewNetworkSimulator()
 
-	currentTime := 0.0
+	currentTime := 1000.0
 	deltaTime := 1.0 / 10.0
 
 	clientConfig := &ClientConfig{NetworkSimulator: simulator}
@@ -1057,7 +1057,7 @@ func TestDisconnectCallbackCanDisconnectClient(t *testing.T) {
 func TestDisconnectCallbackCanDisconnectAllClients(t *testing.T) {
 	simulator := NewNetworkSimulator()
 
-	currentTime := 0.0
+	currentTime := 1000.0
 	deltaTime := 1.0 / 10.0
 
 	clientConfig := &ClientConfig{NetworkSimulator: simulator}
@@ -1135,7 +1135,7 @@ func TestDisconnectCallbackCanDisconnectAllClients(t *testing.T) {
 func TestDisconnectCallbackCanStopServerWithMultipleClients(t *testing.T) {
 	simulator := NewNetworkSimulator()
 
-	currentTime := 0.0
+	currentTime := 1000.0
 	deltaTime := 1.0 / 10.0
 
 	clientConfig := &ClientConfig{NetworkSimulator: simulator}

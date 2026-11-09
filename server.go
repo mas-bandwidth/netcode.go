@@ -339,11 +339,9 @@ func (server *Server) sendClientPacket(p packet, clientIndex int) {
 func (server *Server) resetClientSlot(clientIndex int) {
 	server.clientPacketQueue[clientIndex].clear()
 
-	if server.clientConnected[clientIndex] {
-		server.clientConnected[clientIndex] = false
-		server.numConnectedClients--
-	}
+	// the caller has already marked the slot disconnected and counted it out
 
+	server.clientConnected[clientIndex] = false
 	server.clientLoopback[clientIndex] = false
 	server.clientConfirmed[clientIndex] = false
 	server.clientID[clientIndex] = 0
@@ -1119,10 +1117,8 @@ func (server *Server) DisconnectLoopbackClient(clientIndex int) {
 	// mark the slot disconnected before invoking the callback, so the callback may call
 	// back into the server without re-entering this client's disconnect.
 
-	if server.clientConnected[clientIndex] {
-		server.clientConnected[clientIndex] = false
-		server.numConnectedClients--
-	}
+	server.clientConnected[clientIndex] = false
+	server.numConnectedClients--
 
 	if server.config.ConnectDisconnectCallback != nil {
 		server.config.ConnectDisconnectCallback(clientIndex, false)
