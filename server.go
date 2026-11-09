@@ -15,6 +15,10 @@ var (
 	ErrServerCreateSocketIPv6Failed = errors.New("netcode: failed to create server ipv6 socket")
 	ErrServerBindSocketIPv4Failed   = errors.New("netcode: failed to bind server ipv4 socket")
 	ErrServerBindSocketIPv6Failed   = errors.New("netcode: failed to bind server ipv6 socket")
+
+	// ErrServerOverrideCallbacksRequired is returned when OverrideSendAndReceive
+	// is set but SendPacketOverride or ReceivePacketOverride is nil.
+	ErrServerOverrideCallbacksRequired = errors.New("netcode: OverrideSendAndReceive requires both SendPacketOverride and ReceivePacketOverride")
 )
 
 // Server flags.
@@ -148,6 +152,11 @@ func NewServerDual(serverAddress1String string, serverAddress2String string, con
 		configCopy.MaxConnectTokenLifetime = DefaultMaxConnectTokenLifetime
 	}
 	config = &configCopy
+
+	if config.OverrideSendAndReceive && (config.SendPacketOverride == nil || config.ReceivePacketOverride == nil) {
+		printf(LogLevelError, "error: OverrideSendAndReceive requires SendPacketOverride and ReceivePacketOverride\n")
+		return nil, ErrServerOverrideCallbacksRequired
+	}
 
 	serverAddress1, err := ParseAddress(serverAddress1String)
 	if err != nil {
