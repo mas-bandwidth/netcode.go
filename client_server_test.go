@@ -1503,8 +1503,8 @@ func TestClientServerSocketReceiveBurst(t *testing.T) {
 	}
 }
 
-// TestPacketTagging must run last: packet tagging is enabled process-wide and
-// stays on for any sockets created afterwards, exactly as in the C library.
+// TestPacketTagging enables packet tagging process-wide, so it restores the
+// flag when the test finishes to keep later tests unaffected.
 func TestPacketTagging(t *testing.T) {
 	// IMPORTANT: Packet tagging is off by default because it doesn't play well with some older home routers
 	// See https://learn.microsoft.com/en-us/gaming/gdk/_content/gc/networking/overviews/qos-packet-tagging
@@ -1513,14 +1513,25 @@ func TestPacketTagging(t *testing.T) {
 
 	EnablePacketTagging()
 
+	// Cleanups run in reverse order, so check the restored value after the flag
+	// has been reset.
+	t.Cleanup(func() {
+		if packetTaggingEnabled {
+			t.Error("packet tagging was left enabled")
+		}
+	})
+	t.Cleanup(func() { packetTaggingEnabled = false })
+
 	{
 		serverAddress := "127.0.0.1:40000"
 
 		server, err := NewServer(serverAddress, nil, 0.0)
 		check(t, err == nil)
+		checkPacketTaggingApplied(t, server.socketHolder.ipv4.conn, false)
 
 		client, err := NewClient("127.0.0.1:50000", nil, 0.0)
 		check(t, err == nil)
+		checkPacketTaggingApplied(t, client.socketHolder.ipv4.conn, false)
 
 		connectToken := generateTestConnectToken(t, serverAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1536,9 +1547,11 @@ func TestPacketTagging(t *testing.T) {
 
 		server, err := NewServer(serverAddress, nil, 0.0)
 		check(t, err == nil)
+		checkPacketTaggingApplied(t, server.socketHolder.ipv6.conn, true)
 
 		client, err := NewClient("[::1]:50000", nil, 0.0)
 		check(t, err == nil)
+		checkPacketTaggingApplied(t, client.socketHolder.ipv6.conn, true)
 
 		connectToken := generateTestConnectToken(t, serverAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
