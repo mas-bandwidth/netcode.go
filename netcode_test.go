@@ -1399,10 +1399,13 @@ func TestSocketReadErrorsLogWhileLoggingIsConfigured(t *testing.T) {
 	logged := 0
 	countLogs := func(format string, args ...any) { logged++ }
 
+	backoffs := 0
+	countBackoffs := func(time.Duration) { backoffs++ }
+
 	s := &socket{packets: make(chan receivedPacket, failures)}
 	done := make(chan struct{})
 	go func() {
-		s.readLoop(&failingSocketReader{failures: failures})
+		s.readLoop(&failingSocketReader{failures: failures}, countBackoffs)
 		close(done)
 	}()
 
@@ -1424,6 +1427,9 @@ func TestSocketReadErrorsLogWhileLoggingIsConfigured(t *testing.T) {
 
 	if logged != failures {
 		t.Fatalf("%d socket read errors were logged %d times", failures, logged)
+	}
+	if backoffs != failures {
+		t.Fatalf("%d socket read errors backed off %d times", failures, backoffs)
 	}
 }
 
@@ -1450,7 +1456,7 @@ func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 	}()
 
 	s := &socket{conn: conn, packets: make(chan receivedPacket)}
-	go s.readLoop(conn)
+	go s.readLoop(conn, time.Sleep)
 
 	var before, after runtime.MemStats
 
