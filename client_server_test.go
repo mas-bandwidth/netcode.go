@@ -1215,6 +1215,7 @@ func TestLoopbackStateChangeCallback(t *testing.T) {
 				stateChanges = append(stateChanges, stateChange{previousState, currentState})
 			},
 		},
+		time:                  1000.0,
 		state:                 ClientStateDisconnected,
 		shouldDisconnectState: ClientStateDisconnected,
 	}
