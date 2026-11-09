@@ -3,6 +3,7 @@ package netcode
 import (
 	"errors"
 	"fmt"
+	"math"
 )
 
 // ----------------------------------------------------------------
@@ -303,6 +304,9 @@ func GenerateConnectToken(publicServerAddresses []string,
 	}
 	if len(userData) > UserDataBytes {
 		return nil, fmt.Errorf("netcode: user data must be at most %d bytes", UserDataBytes)
+	}
+	if timeoutSeconds < math.MinInt32 || timeoutSeconds > math.MaxInt32 {
+		return nil, fmt.Errorf("netcode: timeout seconds must be in [%d,%d]", math.MinInt32, math.MaxInt32)
 	}
 
 	// parse public server addresses
