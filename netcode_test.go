@@ -20,7 +20,24 @@ const (
 	testServerPort         = 40000
 	testConnectTokenExpiry = 30
 	testTimeoutSeconds     = 15
+
+	// testNowUnix is the fixed Unix time used by the unit tests, so token
+	// timestamps do not depend on the wall clock.
+	testNowUnix = uint64(1700000000)
 )
+
+// TestMain pins the clock for the unit tests. The C interoperability tests run
+// the reference implementation in another process with the real clock, so
+// leave the clock alone when they are enabled.
+func TestMain(m *testing.M) {
+	previousNowUnix := nowUnix
+	if os.Getenv("NETCODE_C_BIN_DIR") == "" {
+		nowUnix = func() uint64 { return testNowUnix }
+	}
+	code := m.Run()
+	nowUnix = previousNowUnix
+	os.Exit(code)
+}
 
 var testPrivateKey = [KeyBytes]byte{
 	0x60, 0x6a, 0xbe, 0x6e, 0xc9, 0x19, 0x10, 0xea,
@@ -33,6 +50,13 @@ func check(t *testing.T, condition bool) {
 	t.Helper()
 	if !condition {
 		t.Fatal("check failed")
+	}
+}
+
+func requireFunctional(t *testing.T) {
+	t.Helper()
+	if os.Getenv("NETCODE_FUNCTIONAL_TESTS") != "1" {
+		t.Skip("set NETCODE_FUNCTIONAL_TESTS=1 to run tests that use real sockets")
 	}
 }
 
@@ -368,7 +392,7 @@ func TestConnectToken(t *testing.T) {
 
 	// encrypt the buffer
 
-	expireTimestamp := uint64(time.Now().Unix()) + 30
+	expireTimestamp := testNowUnix + 30
 	nonce := generateNonce()
 	key := GenerateKey()
 
@@ -460,7 +484,7 @@ func TestConnectionRequestPacket(t *testing.T) {
 
 	encryptedConnectTokenData := connectTokenData
 
-	connectTokenExpireTimestamp := uint64(time.Now().Unix()) + 30
+	connectTokenExpireTimestamp := testNowUnix + 30
 	connectTokenNonce := generateNonce()
 	connectTokenKey := GenerateKey()
 
@@ -490,7 +514,7 @@ func TestConnectionRequestPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, connectTokenKey, &allowedPackets, nil).(*connectionRequest)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, connectTokenKey, &allowedPackets, nil).(*connectionRequest)
 
 	check(t, ok)
 
@@ -522,7 +546,7 @@ func TestConnectionDeniedPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionDenied)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionDenied)
 
 	check(t, ok)
 	check(t, outputPacket != nil)
@@ -550,7 +574,7 @@ func TestConnectionChallengePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionChallenge)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionChallenge)
 
 	check(t, ok)
 
@@ -581,7 +605,7 @@ func TestConnectionResponsePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionResponse)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionResponse)
 
 	check(t, ok)
 
@@ -613,7 +637,7 @@ func TestConnectionKeepAlivePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionKeepAlive)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionKeepAlive)
 
 	check(t, ok)
 
@@ -643,7 +667,7 @@ func TestConnectionPayloadPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionPayload)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionPayload)
 
 	check(t, ok)
 
@@ -671,7 +695,7 @@ func TestConnectionDisconnectPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionDisconnect)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionDisconnect)
 
 	check(t, ok)
 	check(t, outputPacket != nil)
@@ -699,7 +723,7 @@ func TestConnectTokenPublic(t *testing.T) {
 
 	// encrypt the buffer
 
-	createTimestamp := uint64(time.Now().Unix())
+	createTimestamp := testNowUnix
 	expireTimestamp := createTimestamp + 30
 	connectTokenNonce := generateNonce()
 	key := GenerateKey()
@@ -741,6 +765,33 @@ func TestConnectTokenPublic(t *testing.T) {
 	check(t, outputConnectToken.clientToServerKey == inputConnectToken.clientToServerKey)
 	check(t, outputConnectToken.serverToClientKey == inputConnectToken.serverToClientKey)
 	check(t, outputConnectToken.timeoutSeconds == inputConnectToken.timeoutSeconds)
+}
+
+func TestGenerateConnectTokenUsesInjectedClock(t *testing.T) {
+	const injectedNow = uint64(1234567890)
+
+	previousNowUnix := nowUnix
+	nowUnix = func() uint64 { return injectedNow }
+	defer func() { nowUnix = previousNowUnix }()
+
+	serverAddress := testServerAddress()
+
+	connectTokenData, err := GenerateConnectToken(
+		[]string{serverAddress.String()},
+		[]string{serverAddress.String()},
+		testConnectTokenExpiry,
+		testTimeoutSeconds,
+		testClientID,
+		testProtocolID,
+		testPrivateKey[:],
+		nil,
+	)
+	check(t, err == nil)
+
+	var token connectToken
+	check(t, token.read(connectTokenData) == nil)
+	check(t, token.createTimestamp == injectedNow)
+	check(t, token.expireTimestamp == injectedNow+testConnectTokenExpiry)
 }
 
 func TestEncryptionManager(t *testing.T) {
@@ -968,7 +1019,7 @@ func TestRuntimeGuards(t *testing.T) {
 
 	// no private key needed: nothing in this test decrypts anything
 
-	serverConfig := &ServerConfig{ProtocolID: testProtocolID}
+	serverConfig := &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true}
 
 	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
 	check(t, err == nil)
@@ -1030,6 +1081,7 @@ func TestRuntimeGuards(t *testing.T) {
 }
 
 func TestInitAndDefaults(t *testing.T) {
+	requireFunctional(t)
 	// a nil config must give working defaults instead of crashing
 
 	{
@@ -1048,6 +1100,7 @@ func TestInitAndDefaults(t *testing.T) {
 }
 
 func TestClientCreateError(t *testing.T) {
+	requireFunctional(t)
 	// successful create returns no error
 
 	{
@@ -1109,6 +1162,7 @@ func TestClientCreateError(t *testing.T) {
 }
 
 func TestServerCreateError(t *testing.T) {
+	requireFunctional(t)
 	// successful create returns no error
 
 	{
@@ -1215,6 +1269,7 @@ func TestNetworkSimulatorDeterminism(t *testing.T) {
 }
 
 func TestClientCreate(t *testing.T) {
+	requireFunctional(t)
 	{
 		client, err := NewClient("127.0.0.1:40000", nil, 0.0)
 		check(t, err == nil)
@@ -1269,6 +1324,7 @@ func TestClientCreate(t *testing.T) {
 }
 
 func TestServerCreate(t *testing.T) {
+	requireFunctional(t)
 	{
 		server, err := NewServer("127.0.0.1:40000", nil, 0.0)
 		check(t, err == nil)
@@ -1323,7 +1379,7 @@ func TestServerCreate(t *testing.T) {
 }
 
 func TestServerUnknownAddressDoesNotAllocateWhenLoggingOff(t *testing.T) {
-	server, err := NewServer("127.0.0.1:0", &ServerConfig{ProtocolID: testProtocolID}, 0.0)
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true}, 0.0)
 	check(t, err == nil)
 	defer server.Close()
 
@@ -1372,6 +1428,7 @@ func TestSocketDropSender(t *testing.T) {
 }
 
 func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
+	requireFunctional(t)
 	const datagrams = 2000
 
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})

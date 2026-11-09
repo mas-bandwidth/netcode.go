@@ -3,7 +3,6 @@ package netcode
 import (
 	"errors"
 	"fmt"
-	"time"
 )
 
 // ----------------------------------------------------------------
@@ -341,7 +340,7 @@ func GenerateConnectToken(publicServerAddresses []string,
 
 	// encrypt the buffer
 
-	createTimestamp := uint64(time.Now().Unix())
+	createTimestamp := nowUnix()
 	expireTimestamp := uint64(0xFFFFFFFFFFFFFFFF)
 	if expireSeconds >= 0 {
 		expireTimestamp = createTimestamp + uint64(expireSeconds)

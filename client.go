@@ -1,9 +1,6 @@
 package netcode
 
-import (
-	"errors"
-	"time"
-)
+import "errors"
 
 // Client create errors, returned from NewClient and NewClientDual.
 var (
@@ -328,7 +325,7 @@ func (client *Client) ProcessPacket(from *Address, packetData []byte) {
 	allowedPackets[connectionPayloadPacket] = true
 	allowedPackets[connectionDisconnectPacket] = true
 
-	currentTimestamp := uint64(time.Now().Unix())
+	currentTimestamp := nowUnix()
 
 	var readPacketKey []byte
 	if client.hasPacketKeys {
