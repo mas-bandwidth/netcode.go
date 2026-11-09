@@ -16,7 +16,7 @@ const (
 	// and Update. If the channel fills up faster than Update drains it, further
 	// packets are dropped, just as the OS drops packets when a socket buffer
 	// overflows.
-	socketPacketChannelSize = 1024
+	socketPacketChannelSize = 16384
 )
 
 var packetTaggingEnabled bool
@@ -116,7 +116,7 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 	s := &socket{
 		address: *address,
 		conn:    conn,
-		packets: make(chan receivedPacket, socketPacketChannelSize),
+		packets: make(chan receivedPacket, max(socketPacketChannelSize, receiveBufferSize/256)),
 	}
 
 	// if bound to port 0 find the actual port we got
@@ -131,8 +131,8 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 }
 
 func (s *socket) readLoop() {
+	buffer := make([]byte, maxPacketBytes)
 	for {
-		buffer := make([]byte, maxPacketBytes)
 		bytes, from, err := s.conn.ReadFromUDPAddrPort(buffer)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
@@ -147,6 +147,7 @@ func (s *socket) readLoop() {
 		packet := receivedPacket{from: addressFromNetip(from.Addr(), from.Port()), data: buffer[:bytes]}
 		select {
 		case s.packets <- packet:
+			buffer = make([]byte, maxPacketBytes)
 		default:
 			// channel full: drop the packet
 		}

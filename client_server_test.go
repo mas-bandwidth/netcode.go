@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 )
@@ -1411,6 +1412,66 @@ func TestLoopback(t *testing.T) {
 	check(t, server.ClientConnected(0))
 	check(t, !server.ClientConnected(1))
 	check(t, server.ClientLoopback(0))
+}
+
+func TestClientServerSocketReceiveBurst(t *testing.T) {
+	currentTime := 0.0
+	deltaTime := 1.0 / 10.0
+	serverAddress := "127.0.0.1:40000"
+
+	client, err := NewClient("127.0.0.1:50000", nil, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	serverConfig := &ServerConfig{
+		ProtocolID: testProtocolID,
+		PrivateKey: testPrivateKey,
+	}
+
+	server, err := NewServer(serverAddress, serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	connectToken := generateTestConnectToken(t, serverAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+	client.Connect(connectToken)
+
+	for {
+		client.Update(currentTime)
+		server.Update(currentTime)
+		if client.State() <= ClientStateDisconnected || client.State() == ClientStateConnected {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+		currentTime += deltaTime
+	}
+
+	check(t, client.State() == ClientStateConnected)
+	check(t, server.NumConnectedClients() == 1)
+
+	sender, err := net.Dial("udp4", serverAddress)
+	check(t, err == nil)
+	defer sender.Close()
+
+	for i := 0; i < 2000; i++ {
+		_, err = sender.Write([]byte{0})
+		check(t, err == nil)
+	}
+
+	expected := []byte("valid client payload after burst")
+	client.SendPacket(expected)
+	client.Update(currentTime)
+
+	time.Sleep(50 * time.Millisecond)
+
+	currentTime += deltaTime
+	server.Update(currentTime)
+
+	received, _ := server.ReceivePacket(0)
+	if !bytes.Equal(received, expected) {
+		t.Fatalf("expected client payload %q, got %q", expected, received)
+	}
 }
 
 // TestPacketTagging must run last: packet tagging is enabled process-wide and
