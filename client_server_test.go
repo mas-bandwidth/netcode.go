@@ -689,6 +689,74 @@ func TestClientErrorInvalidConnectToken(t *testing.T) {
 	check(t, client.State() == ClientStateInvalidConnectToken)
 }
 
+func TestClientServerAddressFamilySelection(t *testing.T) {
+	newSingleFamilyClient := func(ipv4, ipv6 bool) *Client {
+		client, err := NewClient("127.0.0.1:50000", &ClientConfig{OverrideSendAndReceive: true}, 0.0)
+		check(t, err == nil)
+		client.config.OverrideSendAndReceive = false
+		if ipv4 {
+			client.socketHolder.ipv4 = &socket{}
+		}
+		if ipv6 {
+			client.socketHolder.ipv6 = &socket{}
+		}
+		return client
+	}
+
+	{
+		client := newSingleFamilyClient(true, false)
+		token, err := GenerateConnectToken([]string{"[::1]:40000"}, []string{"[::1]:40000"},
+			testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+		check(t, err == nil)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateInvalidConnectToken)
+	}
+
+	{
+		client := newSingleFamilyClient(false, true)
+		token, err := GenerateConnectToken([]string{"127.0.0.1:40000"}, []string{"127.0.0.1:40000"},
+			testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+		check(t, err == nil)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateInvalidConnectToken)
+	}
+
+	{
+		client := newSingleFamilyClient(true, false)
+		addrs := []string{"[::1]:40000", "127.0.0.1:40001"}
+		token, err := GenerateConnectToken(addrs, addrs,
+			testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+		check(t, err == nil)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateSendingConnectionRequest)
+		check(t, client.serverAddressIndex == 1)
+		check(t, client.serverAddress.String() == "127.0.0.1:40001")
+	}
+
+	{
+		client := newSingleFamilyClient(true, false)
+		addrs := []string{"127.0.0.1:40000", "[::1]:40001", "127.0.0.1:40002", "[::1]:40003"}
+		token, err := GenerateConnectToken(addrs, addrs,
+			testConnectTokenExpiry, 1, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+		check(t, err == nil)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateSendingConnectionRequest)
+		check(t, client.serverAddressIndex == 0)
+		check(t, client.serverAddress.String() == "127.0.0.1:40000")
+
+		check(t, client.connectToNextServer())
+		check(t, client.State() == ClientStateSendingConnectionRequest)
+		check(t, client.serverAddressIndex == 2)
+		check(t, client.serverAddress.String() == "127.0.0.1:40002")
+
+		check(t, !client.connectToNextServer())
+	}
+}
+
 func TestClientErrorConnectionTimedOut(t *testing.T) {
 	simulator := newLossySimulator()
 
