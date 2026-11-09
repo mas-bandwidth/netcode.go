@@ -3,6 +3,11 @@ package netcode
 import (
 	"bytes"
 	"errors"
+	"net"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -1314,5 +1319,110 @@ func TestServerCreate(t *testing.T) {
 		check(t, server.address.Equal(testAddress))
 
 		server.Close()
+	}
+}
+
+func TestServerUnknownAddressDoesNotAllocateWhenLoggingOff(t *testing.T) {
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{ProtocolID: testProtocolID}, 0.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	previousLogLevel := logLevel
+	SetLogLevel(LogLevelNone)
+	defer SetLogLevel(previousLogLevel)
+
+	from, err := ParseAddress("127.0.0.1:12345")
+	check(t, err == nil)
+
+	packetData := []byte{connectionKeepAlivePacket, 0, 0, 0, 0}
+
+	allocations := testing.AllocsPerRun(100, func() {
+		server.ProcessPacket(&from, packetData)
+	})
+
+	if allocations != 0 {
+		t.Fatalf("processing a packet from an unknown address allocated %v times with logging off", allocations)
+	}
+}
+
+func TestSocketDropSender(t *testing.T) {
+	address := os.Getenv("NETCODE_TEST_DROP_SENDER_ADDRESS")
+	if address == "" {
+		t.Skip("not a sender process")
+	}
+
+	datagrams, err := strconv.Atoi(os.Getenv("NETCODE_TEST_DROP_SENDER_COUNT"))
+	check(t, err == nil)
+
+	conn, err := net.Dial("udp4", address)
+	check(t, err == nil)
+	defer conn.Close()
+
+	var gate [1]byte
+	_, err = os.Stdin.Read(gate[:])
+	check(t, err == nil)
+
+	payload := make([]byte, 16)
+	for i := 0; i < datagrams; i++ {
+		_, err := conn.Write(payload)
+		check(t, err == nil)
+	}
+}
+
+func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
+	const datagrams = 2000
+
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	check(t, err == nil)
+	defer conn.Close()
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSocketDropSender$")
+	cmd.Env = append(os.Environ(),
+		"NETCODE_TEST_DROP_SENDER_ADDRESS="+conn.LocalAddr().String(),
+		"NETCODE_TEST_DROP_SENDER_COUNT="+strconv.Itoa(datagrams),
+	)
+
+	stdin, err := cmd.StdinPipe()
+	check(t, err == nil)
+
+	check(t, cmd.Start() == nil)
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	s := &socket{conn: conn, packets: make(chan receivedPacket)}
+	go s.readLoop()
+
+	var before, after runtime.MemStats
+
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	_, err = stdin.Write([]byte{1})
+	check(t, err == nil)
+	check(t, stdin.Close() == nil)
+	check(t, cmd.Wait() == nil)
+
+	last := before.Mallocs
+	stableSince := time.Now()
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		runtime.ReadMemStats(&after)
+		if after.Mallocs != last {
+			last = after.Mallocs
+			stableSince = time.Now()
+		} else if time.Since(stableSince) >= 50*time.Millisecond {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	allocations := after.Mallocs - before.Mallocs
+	if allocations >= datagrams/2 {
+		t.Fatalf("%d datagrams dropped on a full receive channel caused %d allocations", datagrams, allocations)
 	}
 }

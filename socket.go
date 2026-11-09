@@ -131,8 +131,8 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 }
 
 func (s *socket) readLoop() {
+	buffer := make([]byte, maxPacketBytes)
 	for {
-		buffer := make([]byte, maxPacketBytes)
 		bytes, from, err := s.conn.ReadFromUDPAddrPort(buffer)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
@@ -147,6 +147,7 @@ func (s *socket) readLoop() {
 		packet := receivedPacket{from: addressFromNetip(from.Addr(), from.Port()), data: buffer[:bytes]}
 		select {
 		case s.packets <- packet:
+			buffer = make([]byte, maxPacketBytes)
 		default:
 			// channel full: drop the packet
 		}
