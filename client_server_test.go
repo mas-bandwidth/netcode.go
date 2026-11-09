@@ -947,6 +947,276 @@ func TestServerSideDisconnect(t *testing.T) {
 	check(t, server.ClientDisconnectReason(0) == DisconnectReasonServerDisconnect)
 }
 
+func TestDisconnectCallbackCanStopServer(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 1000.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+
+	client, err := NewClient("[::]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	var server *Server
+	callbackCalls := 0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+		ConnectDisconnectCallback: func(clientIndex int, connected bool) {
+			if connected {
+				return
+			}
+			callbackCalls++
+			if callbackCalls == 1 {
+				server.Stop()
+			}
+		},
+	}
+
+	server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+
+	client.Connect(connectToken)
+
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+
+	check(t, client.State() == ClientStateConnected)
+	check(t, server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 1)
+
+	server.DisconnectClient(0)
+
+	check(t, callbackCalls == 1)
+	check(t, !server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 0)
+	check(t, !server.Running())
+}
+
+func TestDisconnectCallbackCanDisconnectClient(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 1000.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+
+	client, err := NewClient("[::]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	var server *Server
+	callbackCalls := 0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+		ConnectDisconnectCallback: func(clientIndex int, connected bool) {
+			if connected {
+				return
+			}
+			callbackCalls++
+			if callbackCalls == 1 {
+				server.DisconnectClient(clientIndex)
+			}
+		},
+	}
+
+	server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+
+	client.Connect(connectToken)
+
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+
+	check(t, client.State() == ClientStateConnected)
+	check(t, server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 1)
+
+	server.DisconnectClient(0)
+
+	check(t, callbackCalls == 1)
+	check(t, !server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 0)
+	check(t, server.Running())
+}
+
+func TestDisconnectCallbackCanDisconnectAllClients(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 1000.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+
+	clients := make([]*Client, 2)
+	for i := range clients {
+		client, err := NewClient(fmt.Sprintf("[::]:%d", 50000+i), clientConfig, currentTime)
+		check(t, err == nil)
+		clients[i] = client
+		defer client.Close()
+	}
+
+	var server *Server
+	callbackCalls := 0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+		ConnectDisconnectCallback: func(clientIndex int, connected bool) {
+			if connected {
+				return
+			}
+			callbackCalls++
+			if callbackCalls == 1 {
+				server.DisconnectAllClients()
+			}
+		},
+	}
+
+	var err error
+	server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(len(clients))
+
+	for i := range clients {
+		connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+		clients[i].Connect(connectToken)
+	}
+
+	for i := 0; i < 1000; i++ {
+		simulator.Update(currentTime)
+
+		for _, client := range clients {
+			client.Update(currentTime)
+		}
+
+		server.Update(currentTime)
+
+		if clients[0].State() == ClientStateConnected && clients[1].State() == ClientStateConnected && server.NumConnectedClients() == len(clients) {
+			break
+		}
+
+		currentTime += deltaTime
+	}
+
+	for i := range clients {
+		check(t, clients[i].State() == ClientStateConnected)
+		check(t, server.ClientConnected(i))
+	}
+	check(t, server.NumConnectedClients() == len(clients))
+
+	server.DisconnectClient(0)
+
+	check(t, callbackCalls == len(clients))
+	for i := range clients {
+		check(t, !server.ClientConnected(i))
+	}
+	check(t, server.NumConnectedClients() == 0)
+	check(t, server.Running())
+}
+
+func TestDisconnectCallbackCanStopServerWithMultipleClients(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 1000.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+
+	clients := make([]*Client, 3)
+	for i := range clients {
+		client, err := NewClient(fmt.Sprintf("[::]:%d", 50000+i), clientConfig, currentTime)
+		check(t, err == nil)
+		clients[i] = client
+		defer client.Close()
+	}
+
+	var server *Server
+	callbackCalls := 0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+		ConnectDisconnectCallback: func(clientIndex int, connected bool) {
+			if connected {
+				return
+			}
+			callbackCalls++
+			if callbackCalls == 1 {
+				server.Stop()
+			}
+		},
+	}
+
+	var err error
+	server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(len(clients))
+
+	for i := range clients {
+		connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+		clients[i].Connect(connectToken)
+	}
+
+	for i := 0; i < 1000; i++ {
+		simulator.Update(currentTime)
+
+		for _, client := range clients {
+			client.Update(currentTime)
+		}
+
+		server.Update(currentTime)
+
+		allConnected := true
+		for _, client := range clients {
+			if client.State() != ClientStateConnected {
+				allConnected = false
+			}
+		}
+		if allConnected && server.NumConnectedClients() == len(clients) {
+			break
+		}
+
+		currentTime += deltaTime
+	}
+
+	for i := range clients {
+		check(t, clients[i].State() == ClientStateConnected)
+		check(t, server.ClientConnected(i))
+	}
+	check(t, server.NumConnectedClients() == len(clients))
+
+	server.DisconnectClient(0)
+
+	check(t, callbackCalls == len(clients))
+	for i := range clients {
+		check(t, !server.ClientConnected(i))
+	}
+	check(t, server.NumConnectedClients() == 0)
+	check(t, !server.Running())
+}
+
 func TestServerClientDisconnectReason(t *testing.T) {
 	simulator := NewNetworkSimulator()
 
