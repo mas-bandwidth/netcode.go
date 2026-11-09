@@ -3,6 +3,7 @@ package netcode
 import (
 	"bytes"
 	"errors"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -53,6 +54,12 @@ func check(t *testing.T, condition bool) {
 	if !condition {
 		t.Fatal("check failed")
 	}
+}
+
+func testSendPacketOverride(to *Address, packetData []byte) {}
+
+func testReceivePacketOverride() (packetData []byte, from Address, ok bool) {
+	return nil, Address{}, false
 }
 
 func requireFunctional(t *testing.T) {
@@ -796,6 +803,24 @@ func TestGenerateConnectTokenUsesInjectedClock(t *testing.T) {
 	check(t, token.expireTimestamp == injectedNow+testConnectTokenExpiry)
 }
 
+func TestGenerateConnectTokenRejectsOutOfRangeTimeout(t *testing.T) {
+	serverAddress := testServerAddress()
+
+	for _, timeoutSeconds := range []int{math.MaxInt32 + 1, math.MinInt32 - 1} {
+		_, err := GenerateConnectToken(
+			[]string{serverAddress.String()},
+			[]string{serverAddress.String()},
+			testConnectTokenExpiry,
+			timeoutSeconds,
+			testClientID,
+			testProtocolID,
+			testPrivateKey[:],
+			nil,
+		)
+		check(t, err != nil)
+	}
+}
+
 func TestEncryptionManager(t *testing.T) {
 	var manager encryptionManager
 	manager.reset()
@@ -1021,7 +1046,7 @@ func TestRuntimeGuards(t *testing.T) {
 
 	// no private key needed: nothing in this test decrypts anything
 
-	serverConfig := &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true}
+	serverConfig := &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}
 
 	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
 	check(t, err == nil)
@@ -1086,7 +1111,7 @@ func TestConnectLoopbackClientRequiresSendLoopbackPacketCallback(t *testing.T) {
 	// a loopback connection needs a send callback, so without one it must be
 	// refused rather than accepted in a half-connected state
 
-	serverConfig := &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true}
+	serverConfig := &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}
 
 	server, err := NewServer("127.0.0.1:40000", serverConfig, 1000.0)
 	check(t, err == nil)
@@ -1107,7 +1132,7 @@ func TestConnectLoopbackRequiresSendLoopbackPacketCallback(t *testing.T) {
 	// a loopback connection needs a send callback, so without one the client
 	// must stay disconnected
 
-	client, err := NewClient("127.0.0.1:50000", &ClientConfig{OverrideSendAndReceive: true}, 1000.0)
+	client, err := NewClient("127.0.0.1:50000", &ClientConfig{OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}, 1000.0)
 	check(t, err == nil)
 	defer client.Close()
 
@@ -1544,7 +1569,7 @@ func TestServerCreate(t *testing.T) {
 }
 
 func TestServerUnknownAddressDoesNotAllocateWhenLoggingOff(t *testing.T) {
-	server, err := NewServer("127.0.0.1:0", &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true}, 0.0)
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}, 0.0)
 	check(t, err == nil)
 	defer server.Close()
 
