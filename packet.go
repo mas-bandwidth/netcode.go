@@ -308,6 +308,14 @@ func readPacket(buffer []byte,
 		*sequence |= uint64(value) << (8 * i)
 	}
 
+	// the empty-slot marker is not a valid packet sequence. reject it before the
+	// replay protection check so it can never be accepted.
+
+	if *sequence == replayEmpty {
+		printf(LogLevelDebug, "ignored encrypted packet. sequence is invalid\n")
+		return nil
+	}
+
 	// ignore the packet if it has already been received
 
 	if replayProtection != nil && packetType >= connectionKeepAlivePacket {
