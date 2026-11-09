@@ -28,7 +28,14 @@ USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 package netcode
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
+
+// nowUnix returns the current time as a Unix timestamp in seconds. It is a
+// variable so tests can substitute a deterministic clock.
+var nowUnix = func() uint64 { return uint64(time.Now().Unix()) }
 
 // IMPORTANT: netcode is single-threaded by design and is not thread safe.
 //

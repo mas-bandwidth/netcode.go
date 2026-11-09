@@ -1,9 +1,6 @@
 package netcode
 
-import (
-	"errors"
-	"time"
-)
+import "errors"
 
 // Server create errors, returned from NewServer and NewServerDual. Bind
 // failures are reported separately from other socket errors because a port
@@ -270,7 +267,7 @@ func (server *Server) Start(maxClients int) {
 	server.globalSequence = 1 << 63
 	server.challengeSequence = 0
 	RandomBytes(server.challengeKey[:])
-	server.minConnectTokenExpireTimestamp = uint64(time.Now().Unix()) + uint64(server.config.MaxConnectTokenLifetime)
+	server.minConnectTokenExpireTimestamp = nowUnix() + uint64(server.config.MaxConnectTokenLifetime)
 
 	for i := 0; i < server.maxClients; i++ {
 		server.clientPacketQueue[i].clear()
@@ -521,7 +518,7 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
-	currentTimestamp := uint64(time.Now().Unix())
+	currentTimestamp := nowUnix()
 
 	connectTokenEntryIndex := connectTokenEntriesFindOrAdd(&server.connectTokenEntries,
 		from,
@@ -729,7 +726,7 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 func (server *Server) ProcessPacket(from *Address, packetData []byte) {
 	allowedPackets := serverAllowedPackets()
 
-	currentTimestamp := uint64(time.Now().Unix())
+	currentTimestamp := nowUnix()
 
 	server.readAndProcessPacket(from, packetData, currentTimestamp, &allowedPackets)
 }
@@ -797,7 +794,7 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 func (server *Server) receivePackets() {
 	allowedPackets := serverAllowedPackets()
 
-	currentTimestamp := uint64(time.Now().Unix())
+	currentTimestamp := nowUnix()
 
 	if server.config.NetworkSimulator == nil {
 		// process packets received from sockets

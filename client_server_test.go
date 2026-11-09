@@ -209,6 +209,7 @@ func clientServerSocketConnect(t *testing.T, clientAddress, clientAddress2, serv
 }
 
 func TestClientServerIPv4SocketConnect(t *testing.T) {
+	requireFunctional(t)
 	clientServerSocketConnect(t, "0.0.0.0:50000", "", "127.0.0.1:40000", "")
 	clientServerSocketConnect(t, "0.0.0.0:50000", "", "127.0.0.1:40000", "[::1]:40000")
 	clientServerSocketConnect(t, "0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "")
@@ -216,6 +217,7 @@ func TestClientServerIPv4SocketConnect(t *testing.T) {
 }
 
 func TestClientServerIPv6SocketConnect(t *testing.T) {
+	requireFunctional(t)
 	clientServerSocketConnect(t, "[::]:50000", "", "[::1]:40000", "")
 	clientServerSocketConnect(t, "[::]:50000", "", "[::1]:40000", "127.0.0.1:40000")
 	clientServerSocketConnect(t, "0.0.0.0:50000", "[::]:50000", "[::1]:40000", "")
@@ -223,6 +225,7 @@ func TestClientServerIPv6SocketConnect(t *testing.T) {
 }
 
 func TestClientServerDualSocketConnect(t *testing.T) {
+	requireFunctional(t)
 	// dual stack client connects to dual stack server over ipv4
 
 	clientServerSocketConnect(t, "0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000")
@@ -1714,6 +1717,7 @@ func TestLoopback(t *testing.T) {
 }
 
 func TestClientServerSocketReceiveBurst(t *testing.T) {
+	requireFunctional(t)
 	currentTime := 0.0
 	deltaTime := 1.0 / 10.0
 	serverAddress := "127.0.0.1:40000"
@@ -1776,6 +1780,7 @@ func TestClientServerSocketReceiveBurst(t *testing.T) {
 // TestPacketTagging must run last: packet tagging is enabled process-wide and
 // stays on for any sockets created afterwards, exactly as in the C library.
 func TestPacketTagging(t *testing.T) {
+	requireFunctional(t)
 	// IMPORTANT: Packet tagging is off by default because it doesn't play well with some older home routers
 	// See https://learn.microsoft.com/en-us/gaming/gdk/_content/gc/networking/overviews/qos-packet-tagging
 	// However, I really recommend providing players with a way to turn it on, since it can significantly reduce
