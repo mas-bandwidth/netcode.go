@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 )
 
 const (
@@ -125,15 +126,20 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 		s.address.Port = uint16(localAddr.Port)
 	}
 
-	go s.readLoop()
+	go s.readLoop(conn)
 
 	return s, nil
 }
 
-func (s *socket) readLoop() {
+// socketReader is the part of *net.UDPConn the reader goroutine uses.
+type socketReader interface {
+	ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error)
+}
+
+func (s *socket) readLoop(reader socketReader) {
 	buffer := make([]byte, maxPacketBytes)
 	for {
-		bytes, from, err := s.conn.ReadFromUDPAddrPort(buffer)
+		bytes, from, err := reader.ReadFromUDPAddrPort(buffer)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
