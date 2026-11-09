@@ -1073,6 +1073,10 @@ func (server *Server) ConnectLoopbackClient(clientIndex int, clientID uint64, us
 		return
 	}
 
+	if server.config.SendLoopbackPacketCallback == nil {
+		return
+	}
+
 	server.numConnectedClients++
 
 	server.clientLoopback[clientIndex] = true
