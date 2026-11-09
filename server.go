@@ -40,7 +40,7 @@ type ServerConfig struct {
 
 	// MaxConnectTokenLifetime is the longest lifetime in seconds that the backend
 	// issues connect tokens with. The server ignores any connection request whose
-	// connect token expire timestamp is earlier than the server start time plus
+	// connect token expire timestamp is at or before the server start time plus
 	// this lifetime, preventing replays of connect tokens issued before the server
 	// started. If <= 0, DefaultMaxConnectTokenLifetime (30) is used.
 	MaxConnectTokenLifetime int

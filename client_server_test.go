@@ -33,6 +33,11 @@ func newLossySimulator() *NetworkSimulator {
 
 func generateTestConnectToken(t *testing.T, serverAddress string, expireSeconds int, timeoutSeconds int, clientID uint64) []byte {
 	t.Helper()
+	// Test tokens are issued one second beyond the requested lifetime so a
+	// token created in the same second a test server starts remains usable.
+	if expireSeconds > 0 {
+		expireSeconds++
+	}
 	connectToken, err := GenerateConnectToken([]string{serverAddress}, []string{serverAddress},
 		expireSeconds, timeoutSeconds, clientID, testProtocolID, testPrivateKey[:], randomUserData())
 	check(t, err == nil)

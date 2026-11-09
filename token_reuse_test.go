@@ -2,6 +2,7 @@ package netcode
 
 import (
 	"testing"
+	"time"
 )
 
 func TestClientReconnectWithUsedConnectToken(t *testing.T) {
@@ -111,6 +112,75 @@ func TestClientConnectTokenPredatesServerStart(t *testing.T) {
 
 	check(t, client.State() == ClientStateConnected)
 	check(t, server.NumConnectedClients() == 1)
+}
+
+func TestClientConnectTokenReuseAcrossServerRestart(t *testing.T) {
+	const lifetime = DefaultMaxConnectTokenLifetime
+
+	for attempt := 0; attempt < 5; attempt++ {
+		simulator := NewNetworkSimulator()
+
+		currentTime := 0.0
+		deltaTime := 1.0 / 10.0
+
+		clientConfig := &ClientConfig{NetworkSimulator: simulator}
+		client, err := NewClient("[::1]:50000", clientConfig, currentTime)
+		check(t, err == nil)
+
+		serverConfig := &ServerConfig{
+			ProtocolID:              testProtocolID,
+			PrivateKey:              testPrivateKey,
+			NetworkSimulator:        simulator,
+			MaxConnectTokenLifetime: lifetime,
+		}
+		server, err := NewServer("[::1]:40000", serverConfig, currentTime)
+		check(t, err == nil)
+
+		server.Start(1)
+
+		// Issue the token in a later second than the first start so its
+		// first use is accepted.
+		startSecond := time.Now().Unix()
+		for time.Now().Unix() == startSecond {
+			time.Sleep(2 * time.Millisecond)
+		}
+
+		connectTokenData, err := GenerateConnectToken([]string{"[::1]:40000"}, []string{"[::1]:40000"},
+			lifetime, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+		check(t, err == nil)
+
+		var parsed connectToken
+		check(t, parsed.read(connectTokenData) == nil)
+
+		client.Connect(connectTokenData)
+		pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+		check(t, client.State() == ClientStateConnected)
+		check(t, server.NumConnectedClients() == 1)
+
+		server.Stop()
+		simulator.Reset()
+		server.Start(1)
+
+		// The restart must land in the token's creation second for its
+		// expiry to sit exactly at the new start boundary; retry otherwise.
+		if server.minConnectTokenExpireTimestamp != parsed.expireTimestamp {
+			client.Close()
+			server.Close()
+			continue
+		}
+
+		client.Connect(connectTokenData)
+		pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+
+		check(t, client.State() == ClientStateConnectionRequestTimedOut)
+		check(t, server.NumConnectedClients() == 0)
+
+		client.Close()
+		server.Close()
+		return
+	}
+
+	t.Fatal("could not arrange a server restart in the token creation second")
 }
 
 func TestConnectTokenHistoryFullServerRefusal(t *testing.T) {
