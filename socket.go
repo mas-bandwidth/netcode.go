@@ -16,7 +16,7 @@ const (
 	// and Update. If the channel fills up faster than Update drains it, further
 	// packets are dropped, just as the OS drops packets when a socket buffer
 	// overflows.
-	socketPacketChannelSize = 1024
+	socketPacketChannelSize = 16384
 )
 
 var packetTaggingEnabled bool
@@ -116,7 +116,7 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 	s := &socket{
 		address: *address,
 		conn:    conn,
-		packets: make(chan receivedPacket, socketPacketChannelSize),
+		packets: make(chan receivedPacket, max(socketPacketChannelSize, receiveBufferSize/256)),
 	}
 
 	// if bound to port 0 find the actual port we got
