@@ -641,6 +641,10 @@ func (client *Client) MaxClients() int {
 // server in the same process without any packets going over the network. See
 // Server.ConnectLoopbackClient for the server side.
 func (client *Client) ConnectLoopback(clientIndex int, maxClients int) {
+	if client.config.SendLoopbackPacketCallback == nil {
+		return
+	}
+
 	printf(LogLevelInfo, "client connected to server via loopback as client %d\n", clientIndex)
 	client.state = ClientStateConnected
 	client.clientIndex = clientIndex
