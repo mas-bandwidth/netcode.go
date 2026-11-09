@@ -50,9 +50,12 @@ type ServerConfig struct {
 	NetworkSimulator *NetworkSimulator
 
 	// ConnectDisconnectCallback, if set, is called when a client connects to
-	// or disconnects from the server. During a disconnect it fires before the
-	// client slot is reset, so the slot can still be queried from inside the
-	// callback.
+	// or disconnects from the server. On disconnect the client is marked as
+	// disconnected before the callback runs, so the callback may safely call
+	// Server methods such as Stop, DisconnectClient and DisconnectAllClients
+	// without re-entering this client's disconnect. ClientID, ClientAddress,
+	// ClientUserData and ClientDisconnectReason remain valid for the duration
+	// of the callback, while ClientConnected reports false.
 	ConnectDisconnectCallback func(clientIndex int, connected bool)
 
 	// SendLoopbackPacketCallback is called to deliver packets sent to a client
@@ -336,7 +339,11 @@ func (server *Server) sendClientPacket(p packet, clientIndex int) {
 func (server *Server) resetClientSlot(clientIndex int) {
 	server.clientPacketQueue[clientIndex].clear()
 
-	server.clientConnected[clientIndex] = false
+	if server.clientConnected[clientIndex] {
+		server.clientConnected[clientIndex] = false
+		server.numConnectedClients--
+	}
+
 	server.clientLoopback[clientIndex] = false
 	server.clientConfirmed[clientIndex] = false
 	server.clientID[clientIndex] = 0
@@ -346,20 +353,22 @@ func (server *Server) resetClientSlot(clientIndex int) {
 	server.clientAddress[clientIndex] = Address{}
 	server.clientEncryptionIndex[clientIndex] = -1
 	server.clientUserData[clientIndex] = [UserDataBytes]byte{}
-
-	server.numConnectedClients--
 }
 
 func (server *Server) disconnectClientInternal(clientIndex int, sendDisconnectPackets bool, disconnectReason int) {
+	if clientIndex < 0 || clientIndex >= server.maxClients {
+		return
+	}
+
+	if !server.clientConnected[clientIndex] {
+		return
+	}
+
 	printf(LogLevelInfo, "server disconnected client %d\n", clientIndex)
 
 	// record why before the callback fires, so the reason can be queried from inside the callback
 
 	server.clientDisconnectReason[clientIndex] = disconnectReason
-
-	if server.config.ConnectDisconnectCallback != nil {
-		server.config.ConnectDisconnectCallback(clientIndex, false)
-	}
 
 	if sendDisconnectPackets {
 		printf(LogLevelDebug, "server sent disconnect packets to client %d\n", clientIndex)
@@ -370,11 +379,26 @@ func (server *Server) disconnectClientInternal(clientIndex int, sendDisconnectPa
 		}
 	}
 
+	// mark the slot disconnected and drop its encryption mapping before invoking the callback.
+	// the callback may call back into the server (for example Stop or DisconnectClient) and
+	// must not re-enter the disconnect for this slot.
+
+	encryptionIndex := server.clientEncryptionIndex[clientIndex]
+
+	server.clientConnected[clientIndex] = false
+	server.numConnectedClients--
+
 	server.clientReplayProtection[clientIndex].reset()
 
-	server.encryptionManager.clientIndex[server.clientEncryptionIndex[clientIndex]] = -1
+	if encryptionIndex >= 0 {
+		server.encryptionManager.clientIndex[encryptionIndex] = -1
+		server.encryptionManager.removeEncryptionMapping(&server.clientAddress[clientIndex], server.time)
+		server.clientEncryptionIndex[clientIndex] = -1
+	}
 
-	server.encryptionManager.removeEncryptionMapping(&server.clientAddress[clientIndex], server.time)
+	if server.config.ConnectDisconnectCallback != nil {
+		server.config.ConnectDisconnectCallback(clientIndex, false)
+	}
 
 	server.resetClientSlot(clientIndex)
 }
@@ -1091,6 +1115,14 @@ func (server *Server) DisconnectLoopbackClient(clientIndex int) {
 	printf(LogLevelInfo, "server disconnected loopback client %d\n", clientIndex)
 
 	server.clientDisconnectReason[clientIndex] = DisconnectReasonServerDisconnect
+
+	// mark the slot disconnected before invoking the callback, so the callback may call
+	// back into the server without re-entering this client's disconnect.
+
+	if server.clientConnected[clientIndex] {
+		server.clientConnected[clientIndex] = false
+		server.numConnectedClients--
+	}
 
 	if server.config.ConnectDisconnectCallback != nil {
 		server.config.ConnectDisconnectCallback(clientIndex, false)
