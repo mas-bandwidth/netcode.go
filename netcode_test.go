@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"runtime"
@@ -1591,6 +1592,67 @@ func TestSocketDropSender(t *testing.T) {
 	}
 }
 
+// failingSocketReader fails every read until failures run out, then reports
+// the socket closed so the reader goroutine exits.
+type failingSocketReader struct {
+	failures int
+}
+
+func (r *failingSocketReader) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
+	if r.failures == 0 {
+		return 0, netip.AddrPort{}, net.ErrClosed
+	}
+	r.failures--
+	return 0, netip.AddrPort{}, errors.New("read failed")
+}
+
+func TestSocketReadErrorsLogWhileLoggingIsConfigured(t *testing.T) {
+	const failures = 1000
+
+	previousLogLevel := logLevel
+	previousPrintfFunction := printfFunction
+	defer func() {
+		SetLogLevel(previousLogLevel)
+		SetPrintfFunction(previousPrintfFunction)
+	}()
+
+	logged := 0
+	countLogs := func(format string, args ...any) { logged++ }
+
+	backoffs := 0
+	countBackoffs := func(time.Duration) { backoffs++ }
+
+	s := &socket{packets: make(chan receivedPacket, failures)}
+	done := make(chan struct{})
+	go func() {
+		s.readLoop(&failingSocketReader{failures: failures}, countBackoffs)
+		close(done)
+	}()
+
+	for running := true; running; {
+		select {
+		case <-done:
+			running = false
+		default:
+		}
+		SetLogLevel(LogLevelError)
+		SetPrintfFunction(countLogs)
+		s.receivePacket()
+	}
+	for {
+		if _, ok := s.receivePacket(); !ok {
+			break
+		}
+	}
+
+	if logged != failures {
+		t.Fatalf("%d socket read errors were logged %d times", failures, logged)
+	}
+	if backoffs != failures {
+		t.Fatalf("%d socket read errors backed off %d times", failures, backoffs)
+	}
+}
+
 func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 	requireFunctional(t)
 	const datagrams = 2000
@@ -1615,7 +1677,7 @@ func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 	}()
 
 	s := &socket{conn: conn, packets: make(chan receivedPacket)}
-	go s.readLoop()
+	go s.readLoop(conn, time.Sleep)
 
 	var before, after runtime.MemStats
 
