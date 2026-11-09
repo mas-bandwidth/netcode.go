@@ -495,7 +495,7 @@ func TestClientServerMultipleServers(t *testing.T) {
 	serverAddresses := []string{"10.10.10.10:1000", "100.100.100.100:50000", "[::1]:40000"}
 
 	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
-		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+		60, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
 	check(t, err == nil)
 
 	client.Connect(connectToken)
@@ -560,6 +560,35 @@ func TestClientServerMultipleServers(t *testing.T) {
 	}
 
 	check(t, clientNumPacketsReceived >= 10 && serverNumPacketsReceived >= 10)
+}
+
+func TestClientConnectTokenExpiredMultipleServers(t *testing.T) {
+	simulator := newLossySimulator()
+
+	currentTime := 0.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+
+	client, err := NewClient("[::]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	serverAddresses := []string{"10.10.10.10:1000", "100.100.100.100:50000"}
+
+	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
+		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+	check(t, err == nil)
+
+	client.Connect(connectToken)
+
+	for client.State() > ClientStateDisconnected {
+		simulator.Update(currentTime)
+		client.Update(currentTime)
+		currentTime += deltaTime
+	}
+
+	check(t, client.State() == ClientStateConnectTokenExpired)
 }
 
 func TestClientErrorConnectTokenExpired(t *testing.T) {
