@@ -91,6 +91,8 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 						break
 					}
 					m.address[index].Type = AddressNone
+					m.sendKey[index] = [KeyBytes]byte{}
+					m.receiveKey[index] = [KeyBytes]byte{}
 					index--
 				}
 				m.numEncryptionMappings = index + 1
@@ -105,9 +107,16 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 
 func (m *encryptionManager) findEncryptionMapping(address *Address, time float64) int {
 	for i := 0; i < m.numEncryptionMappings; i++ {
-		if m.address[i].Equal(*address) && !m.entryExpired(i, time) {
+		if !m.address[i].Equal(*address) {
+			continue
+		}
+		if !m.entryExpired(i, time) {
 			m.lastAccessTime[i] = time
 			return i
+		}
+		if m.clientIndex[i] == -1 {
+			m.sendKey[i] = [KeyBytes]byte{}
+			m.receiveKey[i] = [KeyBytes]byte{}
 		}
 	}
 	return -1

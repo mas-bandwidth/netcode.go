@@ -419,7 +419,7 @@ func (server *Server) DisconnectAllClients() {
 }
 
 // Stop stops the server, disconnecting all clients. The server can be started
-// again with Start.
+// again with Start, so Stop keeps the private key; Close zeroes it.
 func (server *Server) Stop() {
 	if !server.running {
 		return
