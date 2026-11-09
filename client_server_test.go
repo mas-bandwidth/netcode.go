@@ -1224,12 +1224,17 @@ func TestLoopbackStateChangeCallback(t *testing.T) {
 	check(t, len(stateChanges) == 1)
 	check(t, stateChanges[0].previousState == ClientStateDisconnected)
 	check(t, stateChanges[0].currentState == ClientStateConnected)
+	check(t, client.State() == ClientStateConnected)
+	check(t, client.Loopback())
+	check(t, client.Index() == 0)
+	check(t, client.MaxClients() == 2)
 
 	client.DisconnectLoopback()
 
 	check(t, len(stateChanges) == 2)
 	check(t, stateChanges[1].previousState == ClientStateConnected)
 	check(t, stateChanges[1].currentState == ClientStateDisconnected)
+	check(t, client.State() == ClientStateDisconnected)
 }
 
 type testLoopbackContext struct {
