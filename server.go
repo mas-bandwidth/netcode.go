@@ -61,7 +61,8 @@ type ServerConfig struct {
 
 	// OverrideSendAndReceive replaces socket send and receive with the
 	// SendPacketOverride and ReceivePacketOverride callbacks. No sockets are
-	// created.
+	// created. ReceivePacketOverride's returned packetData slice is modified in
+	// place during packet decryption.
 	OverrideSendAndReceive bool
 	SendPacketOverride     func(to *Address, packetData []byte)
 	ReceivePacketOverride  func() (packetData []byte, from Address, ok bool)
@@ -236,6 +237,7 @@ func NewServer(serverAddressString string, config *ServerConfig, time float64) (
 // its sockets.
 func (server *Server) Close() {
 	server.Stop()
+	clear(server.config.PrivateKey[:])
 	server.socketHolder.destroy()
 }
 
@@ -469,7 +471,14 @@ func (server *Server) findClientIndexByAddress(address *Address) int {
 }
 
 func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest) {
+	defer clear(packet.connectTokenData[:])
+
 	var connectTokenPrivate connectTokenPrivate
+	defer func() {
+		clear(connectTokenPrivate.clientToServerKey[:])
+		clear(connectTokenPrivate.serverToClientKey[:])
+		clear(connectTokenPrivate.userData[:])
+	}()
 	if connectTokenPrivate.read(packet.connectTokenData[:]) != nil {
 		printf(LogLevelDebug, "server ignored connection request. failed to read connect token\n")
 		return
@@ -703,7 +712,7 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 // ProcessPacket processes a raw packet received from the given address, as if
 // it had arrived on one of the server's sockets. This is useful together with
 // ServerConfig.OverrideSendAndReceive to drive the server with your own
-// transport.
+// transport. packetData is modified in place during decryption.
 func (server *Server) ProcessPacket(from *Address, packetData []byte) {
 	allowedPackets := serverAllowedPackets()
 

@@ -1426,3 +1426,53 @@ func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 		t.Fatalf("%d datagrams dropped on a full receive channel caused %d allocations", datagrams, allocations)
 	}
 }
+
+func TestServerProcessPacketZerosPrivateTokenInBuffer(t *testing.T) {
+	serverAddress, err := ParseAddress("127.0.0.1:40000")
+	check(t, err == nil)
+	clientAddress, err := ParseAddress("127.0.0.1:50000")
+	check(t, err == nil)
+
+	userData := make([]byte, UserDataBytes)
+	RandomBytes(userData)
+	inputToken := generateConnectTokenPrivate(testClientID, testTimeoutSeconds, []Address{serverAddress}, userData)
+
+	var encryptedConnectTokenData [connectTokenPrivateBytes]byte
+	inputToken.write(encryptedConnectTokenData[:])
+
+	connectTokenExpireTimestamp := uint64(time.Now().Unix()) + uint64(DefaultMaxConnectTokenLifetime)
+	connectTokenNonce := generateNonce()
+	check(t, encryptConnectTokenPrivate(encryptedConnectTokenData[:], testProtocolID, connectTokenExpireTimestamp, connectTokenNonce[:], testPrivateKey[:]) == nil)
+
+	requestPacket := &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  testProtocolID,
+		connectTokenExpireTimestamp: connectTokenExpireTimestamp,
+		connectTokenNonce:           connectTokenNonce,
+		connectTokenData:            encryptedConnectTokenData,
+	}
+
+	var rawBuffer [maxPacketBytes]byte
+	bytesWritten := writePacket(requestPacket, rawBuffer[:], 0, nil, testProtocolID)
+	check(t, bytesWritten > 0)
+	packetBuffer := rawBuffer[:bytesWritten]
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
+	check(t, err == nil)
+	defer server.Close()
+	server.Start(1)
+
+	server.ProcessPacket(&clientAddress, packetBuffer)
+
+	if bytes.Contains(packetBuffer, inputToken.clientToServerKey[:]) {
+		t.Fatal("clientToServerKey remained in caller packetBuffer after Server.ProcessPacket")
+	}
+	if bytes.Contains(packetBuffer, inputToken.serverToClientKey[:]) {
+		t.Fatal("serverToClientKey remained in caller packetBuffer after Server.ProcessPacket")
+	}
+}
