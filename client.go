@@ -9,6 +9,10 @@ var (
 	ErrClientSimulatorRequiresPort  = errors.New("netcode: must bind to a specific port when using network simulator")
 	ErrClientCreateSocketIPv4Failed = errors.New("netcode: failed to create client ipv4 socket")
 	ErrClientCreateSocketIPv6Failed = errors.New("netcode: failed to create client ipv6 socket")
+
+	// ErrClientOverrideCallbacksRequired is returned when OverrideSendAndReceive
+	// is set but SendPacketOverride or ReceivePacketOverride is nil.
+	ErrClientOverrideCallbacksRequired = errors.New("netcode: OverrideSendAndReceive requires both SendPacketOverride and ReceivePacketOverride")
 )
 
 // ClientConfig configures a Client. The zero value gives working defaults:
@@ -95,6 +99,11 @@ func NewClientDual(address1String string, address2String string, config *ClientC
 		configCopy = *config
 	}
 	config = &configCopy
+
+	if config.OverrideSendAndReceive && (config.SendPacketOverride == nil || config.ReceivePacketOverride == nil) {
+		printf(LogLevelError, "error: OverrideSendAndReceive requires SendPacketOverride and ReceivePacketOverride\n")
+		return nil, ErrClientOverrideCallbacksRequired
+	}
 
 	address1, err := ParseAddress(address1String)
 	if err != nil {

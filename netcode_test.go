@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1248,6 +1249,132 @@ func TestServerCreateError(t *testing.T) {
 		check(t, server == nil)
 		check(t, errors.Is(err, ErrServerBindSocketIPv6Failed))
 	}()
+}
+
+func TestClientCreateRequiresOverrideCallbacks(t *testing.T) {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false }
+
+	cases := []struct {
+		name    string
+		address string
+		config  *ClientConfig
+	}{
+		{"neither callback", "0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true}},
+		{"missing send callback", "0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true, ReceivePacketOverride: receive}},
+		{"missing receive callback", "0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true, SendPacketOverride: send}},
+		{"callbacks checked before address", "not an address", &ClientConfig{OverrideSendAndReceive: true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := NewClient(tc.address, tc.config, 0.0)
+			check(t, client == nil)
+			check(t, errors.Is(err, ErrClientOverrideCallbacksRequired))
+		})
+	}
+
+	// both callbacks supplied creates successfully
+
+	client, err := NewClient("0.0.0.0:0", &ClientConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     send,
+		ReceivePacketOverride:  receive,
+	}, 0.0)
+	check(t, err == nil)
+	check(t, client != nil)
+	client.Close()
+}
+
+func TestServerCreateRequiresOverrideCallbacks(t *testing.T) {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false }
+
+	cases := []struct {
+		name    string
+		address string
+		config  *ServerConfig
+	}{
+		{"neither callback", "127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true}},
+		{"missing send callback", "127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true, ReceivePacketOverride: receive}},
+		{"missing receive callback", "127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true, SendPacketOverride: send}},
+		{"callbacks checked before address", "not an address", &ServerConfig{OverrideSendAndReceive: true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, err := NewServer(tc.address, tc.config, 0.0)
+			check(t, server == nil)
+			check(t, errors.Is(err, ErrServerOverrideCallbacksRequired))
+		})
+	}
+
+	// both callbacks supplied creates successfully
+
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     send,
+		ReceivePacketOverride:  receive,
+	}, 0.0)
+	check(t, err == nil)
+	check(t, server != nil)
+	server.Close()
+}
+
+func TestOverrideCallbacksRequiredErrorNamesCallbacks(t *testing.T) {
+	// the creation error should say which callbacks are required
+
+	checkMessage := func(t *testing.T, err error) {
+		t.Helper()
+		check(t, err != nil)
+		if err == nil {
+			return
+		}
+		check(t, strings.Contains(err.Error(), "SendPacketOverride"))
+		check(t, strings.Contains(err.Error(), "ReceivePacketOverride"))
+	}
+
+	client, err := NewClient("0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true}, 0.0)
+	check(t, client == nil)
+	checkMessage(t, err)
+
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true}, 0.0)
+	check(t, server == nil)
+	checkMessage(t, err)
+}
+
+func TestOverrideCallbacksRequiredWithNetworkSimulator(t *testing.T) {
+	// the network simulator replaces sockets, but not the override callbacks
+
+	client, err := NewClient("127.0.0.1:40000", &ClientConfig{
+		OverrideSendAndReceive: true,
+		NetworkSimulator:       NewNetworkSimulator(),
+	}, 0.0)
+	check(t, client == nil)
+	check(t, errors.Is(err, ErrClientOverrideCallbacksRequired))
+
+	server, err := NewServer("127.0.0.1:40000", &ServerConfig{
+		OverrideSendAndReceive: true,
+		NetworkSimulator:       NewNetworkSimulator(),
+	}, 0.0)
+	check(t, server == nil)
+	check(t, errors.Is(err, ErrServerOverrideCallbacksRequired))
+
+	// with the flag off, nil callbacks are accepted
+
+	client, err = NewClient("127.0.0.1:40000", &ClientConfig{
+		NetworkSimulator: NewNetworkSimulator(),
+	}, 0.0)
+	check(t, err == nil)
+	check(t, client != nil)
+	client.Close()
+
+	server, err = NewServer("127.0.0.1:40000", &ServerConfig{
+		NetworkSimulator: NewNetworkSimulator(),
+	}, 0.0)
+	check(t, err == nil)
+	check(t, server != nil)
+	server.Close()
 }
 
 func TestNetworkSimulatorDeterminism(t *testing.T) {

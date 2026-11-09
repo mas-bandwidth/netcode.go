@@ -3,6 +3,7 @@ package netcode
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"testing"
@@ -30,6 +31,62 @@ func newLossySimulator() *NetworkSimulator {
 	simulator.PacketLossPercent = 5
 	simulator.DuplicatePacketPercent = 10
 	return simulator
+}
+
+func TestClientCreateDualRequiresOverrideCallbacks(t *testing.T) {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false }
+
+	cases := []*ClientConfig{
+		{OverrideSendAndReceive: true},
+		{OverrideSendAndReceive: true, ReceivePacketOverride: receive},
+		{OverrideSendAndReceive: true, SendPacketOverride: send},
+	}
+
+	for _, c := range cases {
+		client, err := NewClientDual("0.0.0.0:0", "[::]:0", c, 0.0)
+		check(t, client == nil)
+		check(t, errors.Is(err, ErrClientOverrideCallbacksRequired))
+	}
+
+	// both callbacks supplied creates successfully
+
+	client, err := NewClientDual("0.0.0.0:0", "[::]:0", &ClientConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     send,
+		ReceivePacketOverride:  receive,
+	}, 0.0)
+	check(t, err == nil)
+	check(t, client != nil)
+	client.Close()
+}
+
+func TestServerCreateDualRequiresOverrideCallbacks(t *testing.T) {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false }
+
+	cases := []*ServerConfig{
+		{OverrideSendAndReceive: true},
+		{OverrideSendAndReceive: true, ReceivePacketOverride: receive},
+		{OverrideSendAndReceive: true, SendPacketOverride: send},
+	}
+
+	for _, c := range cases {
+		server, err := NewServerDual("127.0.0.1:0", "[::1]:0", c, 0.0)
+		check(t, server == nil)
+		check(t, errors.Is(err, ErrServerOverrideCallbacksRequired))
+	}
+
+	// both callbacks supplied creates successfully
+
+	server, err := NewServerDual("127.0.0.1:0", "[::1]:0", &ServerConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     send,
+		ReceivePacketOverride:  receive,
+	}, 0.0)
+	check(t, err == nil)
+	check(t, server != nil)
+	server.Close()
 }
 
 func generateTestConnectToken(t *testing.T, serverAddress string, expireSeconds int, timeoutSeconds int, clientID uint64) []byte {
