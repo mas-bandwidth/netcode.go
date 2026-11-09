@@ -596,7 +596,9 @@ func (server *Server) connectClient(clientIndex int, address *Address, clientID 
 		connectTokenEntriesConsume(&server.connectTokenEntries, connectTokenEntryIndex)
 	}
 
-	printf(LogLevelInfo, "server accepted client %s %.16x in slot %d\n", address.String(), clientID, clientIndex)
+	if logLevel >= LogLevelInfo {
+		printf(LogLevelInfo, "server accepted client %s %.16x in slot %d\n", address.String(), clientID, clientIndex)
+	}
 
 	packet := &connectionKeepAlive{
 		clientIndex: int32(clientIndex),
@@ -655,13 +657,17 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 	switch t := p.(type) {
 	case *connectionRequest:
 		if server.flags&serverFlagIgnoreConnectionRequestPackets == 0 {
-			printf(LogLevelDebug, "server received connection request from %s\n", from.String())
+			if logLevel >= LogLevelDebug {
+				printf(LogLevelDebug, "server received connection request from %s\n", from.String())
+			}
 			server.processConnectionRequestPacket(from, t)
 		}
 
 	case *connectionResponse:
 		if server.flags&serverFlagIgnoreConnectionResponsePackets == 0 {
-			printf(LogLevelDebug, "server received connection response from %s\n", from.String())
+			if logLevel >= LogLevelDebug {
+				printf(LogLevelDebug, "server received connection response from %s\n", from.String())
+			}
 			server.processConnectionResponsePacket(from, t, encryptionIndex)
 		}
 
@@ -738,7 +744,9 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 	readPacketKey := server.encryptionManager.getReceiveKey(encryptionIndex)
 
 	if readPacketKey == nil && packetData[0] != 0 {
-		printf(LogLevelDebug, "server could not process packet because no encryption mapping exists for %s\n", from.String())
+		if logLevel >= LogLevelDebug {
+			printf(LogLevelDebug, "server could not process packet because no encryption mapping exists for %s\n", from.String())
+		}
 		return
 	}
 
