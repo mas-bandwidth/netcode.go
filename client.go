@@ -493,6 +493,7 @@ func (client *Client) connectToNextServer() bool {
 // Update advances the client to the given time: it receives and processes
 // packets, sends outgoing packets, and applies timeouts. Call it regularly,
 // for example 60 times per second.
+// time must be monotonically non-decreasing across calls.
 func (client *Client) Update(time float64) {
 	client.time = time
 
