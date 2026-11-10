@@ -115,12 +115,48 @@ func FuzzReadPacket(f *testing.F) {
 	})
 }
 
+// fuzzPacketsEqual reports whether actual carries the same fields as
+// expected. The connection request's connect token is encrypted when written
+// and decrypted when read, so its plaintext is passed separately.
+func fuzzPacketsEqual(expected, actual packet, requestTokenPlaintext []byte) bool {
+	switch e := expected.(type) {
+	case *connectionRequest:
+		a, ok := actual.(*connectionRequest)
+		return ok &&
+			a.versionInfo == e.versionInfo &&
+			a.protocolID == e.protocolID &&
+			a.connectTokenExpireTimestamp == e.connectTokenExpireTimestamp &&
+			a.connectTokenNonce == e.connectTokenNonce &&
+			bytes.Equal(a.connectTokenData[:connectTokenPrivateBytes-MacBytes], requestTokenPlaintext)
+	case *connectionDenied:
+		_, ok := actual.(*connectionDenied)
+		return ok
+	case *connectionChallenge:
+		a, ok := actual.(*connectionChallenge)
+		return ok && a.challengeTokenSequence == e.challengeTokenSequence && a.challengeTokenData == e.challengeTokenData
+	case *connectionResponse:
+		a, ok := actual.(*connectionResponse)
+		return ok && a.challengeTokenSequence == e.challengeTokenSequence && a.challengeTokenData == e.challengeTokenData
+	case *connectionKeepAlive:
+		a, ok := actual.(*connectionKeepAlive)
+		return ok && a.clientIndex == e.clientIndex && a.maxClients == e.maxClients
+	case *connectionPayload:
+		a, ok := actual.(*connectionPayload)
+		return ok && bytes.Equal(a.payloadData, e.payloadData)
+	case *connectionDisconnect:
+		_, ok := actual.(*connectionDisconnect)
+		return ok
+	}
+	return false
+}
+
 // FuzzWriteReadPacketRoundTrip builds a packet from fuzz-derived fields,
 // writes and encrypts it with the real keys, optionally corrupts one byte,
 // then reads it back. This drives the post-decryption parsing, and asserts the
 // round-trip property: an uncorrupted packet written by writePacket must read
-// back with the same type and sequence. Connection requests get their connect
-// token encrypted with the real private key, so the full request path
+// back with the same type, sequence and fields, and a packet corrupted within
+// its encrypted body or MAC must be refused. Connection requests get their
+// connect token encrypted with the real private key, so the full request path
 // including token decrypt and read is covered.
 func FuzzWriteReadPacketRoundTrip(f *testing.F) {
 	f.Add(uint8(connectionRequestPacket), uint64(1000), false, uint16(0), uint8(0), []byte("seed"))
@@ -136,6 +172,7 @@ func FuzzWriteReadPacketRoundTrip(f *testing.F) {
 		// build the packet struct for the chosen type from fuzz input
 
 		var inputPacket packet
+		var requestTokenPlaintext []byte
 
 		switch packetType {
 		case connectionRequestPacket:
@@ -152,6 +189,7 @@ func FuzzWriteReadPacketRoundTrip(f *testing.F) {
 			}
 			in.read(request.connectTokenNonce[:])
 			in.read(request.connectTokenData[:connectTokenPrivateBytes-MacBytes])
+			requestTokenPlaintext = append([]byte(nil), request.connectTokenData[:connectTokenPrivateBytes-MacBytes]...)
 			if encryptConnectTokenPrivate(request.connectTokenData[:], testProtocolID, expireTimestamp, request.connectTokenNonce[:], fuzzPrivateKey) != nil {
 				return
 			}
@@ -194,35 +232,53 @@ func FuzzWriteReadPacketRoundTrip(f *testing.F) {
 			t.Fatalf("failed to write packet type %d", packetType)
 		}
 
+		// find where the encrypted body starts: prefix byte, sequence bytes,
+		// then ciphertext and MAC. A connection request's encrypted region is
+		// its connect token, which follows the clear header.
+		encryptedStart := 1 + sequenceNumberBytesRequired(sequence)
+		if packetType == connectionRequestPacket {
+			encryptedStart = 1 + versionInfoBytes + 8 + 8 + connectTokenNonceBytes
+		}
+
 		corrupted := false
+		corruptIndex := 0
 		if corrupt && corruptXor != 0 {
-			buffer[int(corruptOffset)%packetBytes] ^= corruptXor
+			corruptIndex = int(corruptOffset) % packetBytes
+			buffer[corruptIndex] ^= corruptXor
 			corrupted = true
 		}
 
 		var readSequence uint64
 		outputPacket := fuzzReadPacket(buffer[:packetBytes], &readSequence, nil)
 
-		if !corrupted {
-			// 0xFFFFFFFFFFFFFFFF is a reserved sequence, so an encrypted packet
-			// cannot carry it.
+		if corrupted {
+			if corruptIndex >= encryptedStart && outputPacket != nil {
+				t.Fatalf("packet type %d corrupted within its encrypted body or MAC read back as %T", packetType, outputPacket)
+			}
+			return
+		}
 
-			if packetType != connectionRequestPacket && sequence == 0xFFFFFFFFFFFFFFFF {
-				if outputPacket != nil {
-					t.Fatalf("packet with reserved sequence was not rejected")
-				}
-				return
-			}
+		// 0xFFFFFFFFFFFFFFFF is a reserved sequence, so an encrypted packet
+		// cannot carry it.
 
-			if outputPacket == nil {
-				t.Fatalf("uncorrupted packet type %d failed to read back", packetType)
+		if packetType != connectionRequestPacket && sequence == 0xFFFFFFFFFFFFFFFF {
+			if outputPacket != nil {
+				t.Fatalf("packet with reserved sequence was not rejected")
 			}
-			if outputPacket.packetType() != packetType {
-				t.Fatalf("packet type changed in round trip: wrote %d, read %d", packetType, outputPacket.packetType())
-			}
-			if packetType != connectionRequestPacket && readSequence != sequence {
-				t.Fatalf("sequence changed in round trip: wrote %d, read %d", sequence, readSequence)
-			}
+			return
+		}
+
+		if outputPacket == nil {
+			t.Fatalf("uncorrupted packet type %d failed to read back", packetType)
+		}
+		if outputPacket.packetType() != packetType {
+			t.Fatalf("packet type changed in round trip: wrote %d, read %d", packetType, outputPacket.packetType())
+		}
+		if !fuzzPacketsEqual(inputPacket, outputPacket, requestTokenPlaintext) {
+			t.Fatalf("packet type %d fields changed in round trip", packetType)
+		}
+		if packetType != connectionRequestPacket && readSequence != sequence {
+			t.Fatalf("sequence changed in round trip: wrote %d, read %d", sequence, readSequence)
 		}
 	})
 }

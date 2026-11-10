@@ -95,8 +95,15 @@ func connectTokenEntriesFindOrAdd(entries *[maxConnectTokenEntries]connectTokenE
 	return connectTokenEntryRefused
 }
 
-func connectTokenEntriesConsume(entries *[maxConnectTokenEntries]connectTokenEntry, index int) {
-	if index >= 0 && index < maxConnectTokenEntries {
+// connectTokenEntriesConsume marks the entry at index consumed if it still holds
+// the given connect token MAC. The index alone is not enough: an expired token's
+// entry may have been reused by a different token, in which case consuming it
+// would refuse the token that now owns the slot.
+func connectTokenEntriesConsume(entries *[maxConnectTokenEntries]connectTokenEntry, index int, mac []byte) {
+	if index >= 0 && index < maxConnectTokenEntries &&
+		entries[index].state != connectTokenEntryFree &&
+		len(mac) == MacBytes &&
+		[MacBytes]byte(mac) == entries[index].mac {
 		entries[index].state = connectTokenEntryConsumed
 	}
 }

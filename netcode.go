@@ -28,7 +28,14 @@ USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 package netcode
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
+
+// nowUnix returns the current time as a Unix timestamp in seconds. It is a
+// variable so tests can substitute a deterministic clock.
+var nowUnix = func() uint64 { return uint64(time.Now().Unix()) }
 
 // IMPORTANT: netcode is single-threaded by design and is not thread safe.
 //
@@ -42,10 +49,10 @@ import "fmt"
 // Go module, which is tagged independently, and it is not the protocol version
 // on the wire: that is versionInfo below, which never changes.
 const (
-	VersionFull  = "1.4.8"
+	VersionFull  = "1.4.9"
 	VersionMajor = 1
 	VersionMinor = 4
-	VersionPatch = 8
+	VersionPatch = 9
 )
 
 const (

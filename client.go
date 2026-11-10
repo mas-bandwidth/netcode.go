@@ -1,9 +1,6 @@
 package netcode
 
-import (
-	"errors"
-	"time"
-)
+import "errors"
 
 // Client create errors, returned from NewClient and NewClientDual.
 var (
@@ -12,6 +9,10 @@ var (
 	ErrClientSimulatorRequiresPort  = errors.New("netcode: must bind to a specific port when using network simulator")
 	ErrClientCreateSocketIPv4Failed = errors.New("netcode: failed to create client ipv4 socket")
 	ErrClientCreateSocketIPv6Failed = errors.New("netcode: failed to create client ipv6 socket")
+
+	// ErrClientOverrideCallbacksRequired is returned when OverrideSendAndReceive
+	// is set but SendPacketOverride or ReceivePacketOverride is nil.
+	ErrClientOverrideCallbacksRequired = errors.New("netcode: OverrideSendAndReceive requires both SendPacketOverride and ReceivePacketOverride")
 )
 
 // ClientConfig configures a Client. The zero value gives working defaults:
@@ -98,6 +99,11 @@ func NewClientDual(address1String string, address2String string, config *ClientC
 		configCopy = *config
 	}
 	config = &configCopy
+
+	if config.OverrideSendAndReceive && (config.SendPacketOverride == nil || config.ReceivePacketOverride == nil) {
+		printf(LogLevelError, "error: OverrideSendAndReceive requires SendPacketOverride and ReceivePacketOverride\n")
+		return nil, ErrClientOverrideCallbacksRequired
+	}
 
 	address1, err := ParseAddress(address1String)
 	if err != nil {
@@ -243,8 +249,21 @@ func (client *Client) Connect(connectTokenData []byte) {
 		return
 	}
 
-	client.serverAddressIndex = 0
-	client.serverAddress = client.connectToken.serverAddresses[0]
+	serverAddressIndex := -1
+	for i := 0; i < client.connectToken.numServerAddresses; i++ {
+		if client.canReachServerAddress(&client.connectToken.serverAddresses[i]) {
+			serverAddressIndex = i
+			break
+		}
+	}
+	if serverAddressIndex < 0 {
+		client.connectToken = connectToken{}
+		client.setState(ClientStateInvalidConnectToken)
+		return
+	}
+
+	client.serverAddressIndex = serverAddressIndex
+	client.serverAddress = client.connectToken.serverAddresses[serverAddressIndex]
 
 	if client.connectToken.numServerAddresses == 1 {
 		printf(LogLevelInfo, "client connecting to server %s\n", client.serverAddress.String())
@@ -328,7 +347,7 @@ func (client *Client) ProcessPacket(from *Address, packetData []byte) {
 	allowedPackets[connectionPayloadPacket] = true
 	allowedPackets[connectionDisconnectPacket] = true
 
-	currentTimestamp := uint64(time.Now().Unix())
+	currentTimestamp := nowUnix()
 
 	var readPacketKey []byte
 	if client.hasPacketKeys {
@@ -471,13 +490,27 @@ func (client *Client) sendPackets() {
 	}
 }
 
+func (client *Client) canReachServerAddress(address *Address) bool {
+	if client.config.NetworkSimulator != nil || client.config.OverrideSendAndReceive {
+		return true
+	}
+	return client.socketHolder.hasSocketForAddress(address)
+}
+
 func (client *Client) connectToNextServer() bool {
-	if client.serverAddressIndex+1 >= client.connectToken.numServerAddresses {
+	nextIndex := -1
+	for i := client.serverAddressIndex + 1; i < client.connectToken.numServerAddresses; i++ {
+		if client.canReachServerAddress(&client.connectToken.serverAddresses[i]) {
+			nextIndex = i
+			break
+		}
+	}
+	if nextIndex < 0 {
 		printf(LogLevelDebug, "client has no more servers to connect to\n")
 		return false
 	}
 
-	client.serverAddressIndex++
+	client.serverAddressIndex = nextIndex
 	client.serverAddress = client.connectToken.serverAddresses[client.serverAddressIndex]
 
 	client.resetBeforeNextConnect()
@@ -493,6 +526,7 @@ func (client *Client) connectToNextServer() bool {
 // Update advances the client to the given time: it receives and processes
 // packets, sends outgoing packets, and applies timeouts. Call it regularly,
 // for example 60 times per second.
+// time must be monotonically non-decreasing across calls.
 func (client *Client) Update(time float64) {
 	client.time = time
 
@@ -641,11 +675,15 @@ func (client *Client) MaxClients() int {
 // server in the same process without any packets going over the network. See
 // Server.ConnectLoopbackClient for the server side.
 func (client *Client) ConnectLoopback(clientIndex int, maxClients int) {
+	if client.config.SendLoopbackPacketCallback == nil {
+		return
+	}
+
 	printf(LogLevelInfo, "client connected to server via loopback as client %d\n", clientIndex)
-	client.state = ClientStateConnected
 	client.clientIndex = clientIndex
 	client.maxClients = maxClients
 	client.loopback = true
+	client.setState(ClientStateConnected)
 }
 
 // DisconnectLoopback disconnects a client in loopback mode.
