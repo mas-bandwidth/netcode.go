@@ -716,6 +716,107 @@ func TestConnectionDisconnectPacket(t *testing.T) {
 	check(t, outputPacket != nil)
 }
 
+func TestReadPacketRejectsInvalidPackets(t *testing.T) {
+	packetKey := GenerateKey()
+	wrongPacketKey := GenerateKey()
+	privateKey := GenerateKey()
+	wrongPrivateKey := GenerateKey()
+
+	connectTokenExpireTimestamp := testNowUnix + 30
+	connectTokenNonce := generateNonce()
+	var connectTokenData [connectTokenPrivateBytes]byte
+	check(t, encryptConnectTokenPrivate(connectTokenData[:], testProtocolID, connectTokenExpireTimestamp, connectTokenNonce[:], privateKey) == nil)
+
+	testCases := []struct {
+		name     string
+		packet   packet
+		private  []byte
+		wrongKey []byte
+	}{
+		{
+			name: "connection request",
+			packet: &connectionRequest{
+				versionInfo:                 versionInfo,
+				protocolID:                  testProtocolID,
+				connectTokenExpireTimestamp: connectTokenExpireTimestamp,
+				connectTokenNonce:           connectTokenNonce,
+				connectTokenData:            connectTokenData,
+			},
+			private:  privateKey,
+			wrongKey: wrongPrivateKey,
+		},
+		{
+			name:     "connection denied",
+			packet:   &connectionDenied{},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection challenge",
+			packet:   &connectionChallenge{challengeTokenSequence: 1000},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection response",
+			packet:   &connectionResponse{challengeTokenSequence: 1000},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection keep alive",
+			packet:   &connectionKeepAlive{clientIndex: 10, maxClients: 16},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection payload",
+			packet:   &connectionPayload{payloadData: []byte("payload")},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection disconnect",
+			packet:   &connectionDisconnect{},
+			wrongKey: wrongPacketKey,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var buffer [maxPacketBytes]byte
+			bytesWritten := writePacket(testCase.packet, buffer[:], 1000, packetKey, testProtocolID)
+			check(t, bytesWritten > 0)
+
+			allowedPackets := allPacketsAllowed()
+
+			read := func(data []byte, key []byte, protocolID uint64, privateKey []byte) packet {
+				copied := append([]byte(nil), data...)
+				var sequence uint64
+				return readPacket(copied, &sequence, key, protocolID, testNowUnix, 0, privateKey, &allowedPackets, nil)
+			}
+
+			// the unmodified packet is accepted
+
+			check(t, read(buffer[:bytesWritten], packetKey, testProtocolID, testCase.private) != nil)
+
+			// a flipped ciphertext or tag byte is refused
+
+			tampered := append([]byte(nil), buffer[:bytesWritten]...)
+			tampered[bytesWritten-1] ^= 0xFF
+			check(t, read(tampered, packetKey, testProtocolID, testCase.private) == nil)
+
+			// a wrong key is refused
+
+			if testCase.private != nil {
+				// a connection request is decrypted with the private key
+				check(t, read(buffer[:bytesWritten], packetKey, testProtocolID, testCase.wrongKey) == nil)
+			} else {
+				check(t, read(buffer[:bytesWritten], testCase.wrongKey, testProtocolID, nil) == nil)
+			}
+
+			// a wrong protocol id is refused
+
+			check(t, read(buffer[:bytesWritten], packetKey, testProtocolID+1, testCase.private) == nil)
+		})
+	}
+}
+
 func TestConnectTokenPublic(t *testing.T) {
 	// generate a private connect token
 
