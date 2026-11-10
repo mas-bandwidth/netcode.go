@@ -2029,23 +2029,40 @@ func TestClientServerSocketReceiveBurst(t *testing.T) {
 	check(t, err == nil)
 	defer func() { _ = sender.Close() }()
 
-	for i := 0; i < 2000; i++ {
-		_, err = sender.Write([]byte{0})
-		check(t, err == nil)
-	}
+	// real UDP may drop any one datagram, so each attempt sends the burst and then the
+	// payload again, until the server receives the payload or the attempts run out. the
+	// burst is sent on every attempt, so a receive channel too small to hold it drops the
+	// payload on every attempt, not just the first.
 
 	expected := []byte("valid client payload after burst")
-	client.SendPacket(expected)
-	client.Update(currentTime)
+	received := false
 
-	time.Sleep(50 * time.Millisecond)
+	for attempt := 0; attempt < 50 && !received; attempt++ {
+		for i := 0; i < 2000; i++ {
+			_, err = sender.Write([]byte{0})
+			check(t, err == nil)
+		}
 
-	currentTime += deltaTime
-	server.Update(currentTime)
+		client.SendPacket(expected)
+		client.Update(currentTime)
 
-	received, _ := server.ReceivePacket(0)
-	if !bytes.Equal(received, expected) {
-		t.Fatalf("expected client payload %q, got %q", expected, received)
+		time.Sleep(50 * time.Millisecond)
+
+		currentTime += deltaTime
+		server.Update(currentTime)
+
+		for {
+			packet, _ := server.ReceivePacket(0)
+			if packet == nil {
+				break
+			}
+			check(t, bytes.Equal(packet, expected))
+			received = true
+		}
+	}
+
+	if !received {
+		t.Fatalf("the server never received the client payload %q after a burst", expected)
 	}
 }
 
