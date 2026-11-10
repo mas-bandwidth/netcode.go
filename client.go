@@ -293,7 +293,7 @@ func (client *Client) processPacketInternal(from *Address, p packet, sequence ui
 		if from.Equal(client.serverAddress) {
 			maxClients := int(t.maxClients)
 			clientIndex := int(t.clientIndex)
-			if !(maxClients > 0 && maxClients <= MaxClients && clientIndex >= 0 && clientIndex < maxClients) {
+			if maxClients <= 0 || maxClients > MaxClients || clientIndex < 0 || clientIndex >= maxClients {
 				printf(LogLevelDebug, "ignored connection keep alive packet. client index or max clients out of range\n")
 				break
 			}
