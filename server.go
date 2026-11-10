@@ -460,6 +460,7 @@ func (server *Server) DisconnectAllClients() {
 // was created with, so the server can be started again; Close also zeroes it.
 func (server *Server) Stop() {
 	if !server.running {
+		clear(server.config.PrivateKey[:])
 		return
 	}
 
@@ -712,6 +713,8 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 				printf(LogLevelDebug, "server received connection request from %s\n", from.String())
 			}
 			server.processConnectionRequestPacket(from, t, currentTimestamp)
+		} else {
+			clear(t.connectTokenData[:])
 		}
 
 	case *connectionResponse:

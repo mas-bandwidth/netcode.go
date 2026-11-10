@@ -2002,6 +2002,63 @@ func TestServerStopZeroesPrivateKey(t *testing.T) {
 	}
 }
 
+func TestServerIgnoredConnectionRequestClearsTokenData(t *testing.T) {
+	serverAddress, err := ParseAddress("127.0.0.1:40000")
+	check(t, err == nil)
+	clientAddress, err := ParseAddress("127.0.0.1:50000")
+	check(t, err == nil)
+
+	userData := make([]byte, UserDataBytes)
+	RandomBytes(userData)
+	inputToken := generateConnectTokenPrivate(testClientID, testTimeoutSeconds, []Address{serverAddress}, userData)
+
+	var connectTokenData [connectTokenPrivateBytes]byte
+	inputToken.write(connectTokenData[:])
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 1000.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.flags = serverFlagIgnoreConnectionRequestPackets
+
+	request := &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  testProtocolID,
+		connectTokenExpireTimestamp: uint64(1) << 62,
+		connectTokenData:            connectTokenData,
+	}
+	server.processPacketInternal(&clientAddress, request, 0, -1, -1, 0)
+
+	if bytes.Contains(request.connectTokenData[:], inputToken.clientToServerKey[:]) {
+		t.Fatal("clientToServerKey remained in an ignored connection request")
+	}
+	if bytes.Contains(request.connectTokenData[:], inputToken.serverToClientKey[:]) {
+		t.Fatal("serverToClientKey remained in an ignored connection request")
+	}
+}
+
+func TestServerStopBeforeStartZeroesPrivateKey(t *testing.T) {
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Stop()
+
+	if server.config.PrivateKey != ([KeyBytes]byte{}) {
+		t.Fatal("Stop before Start did not zero the server's private key")
+	}
+}
+
 func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
 	var zeroKey [KeyBytes]byte
 
