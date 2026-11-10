@@ -89,6 +89,7 @@ type Server struct {
 	flags                          uint32
 	time                           float64
 	running                        bool
+	closed                         bool
 	maxClients                     int
 	numConnectedClients            int
 	globalSequence                 uint64
@@ -246,14 +247,20 @@ func NewServer(serverAddressString string, config *ServerConfig, time float64) (
 // its sockets.
 func (server *Server) Close() {
 	server.Stop()
+	server.closed = true
 	clear(server.config.PrivateKey[:])
 	server.socketHolder.destroy()
 }
 
 // Start starts the server with the given number of client slots, in
 // [1,MaxClients]. If the server is already running it is stopped and
-// restarted.
+// restarted. A server that has been closed cannot be started.
 func (server *Server) Start(maxClients int) {
+	if server.closed {
+		printf(LogLevelError, "error: server is closed and cannot be started\n")
+		return
+	}
+
 	// the per-client arrays are sized MaxClients. an out of range value must not get through
 
 	if maxClients <= 0 || maxClients > MaxClients {

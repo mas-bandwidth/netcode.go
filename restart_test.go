@@ -89,6 +89,25 @@ func TestServerKeepsOwnConfigAfterCallerClearsIt(t *testing.T) {
 	check(t, !connectsWithKey(t, simulator, server, &currentTime, [KeyBytes]byte{}, "127.0.0.1:50001"))
 }
 
+func TestServerStartRefusesClosedServer(t *testing.T) {
+	simulator := NewNetworkSimulator()
+	currentTime := 1000.0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, currentTime)
+	check(t, err == nil)
+
+	server.Close()
+	server.Start(2)
+
+	check(t, !server.Running())
+	check(t, !connectsWithKey(t, simulator, server, &currentTime, [KeyBytes]byte{}, "127.0.0.1:50000"))
+}
+
 func TestServerKeepsOwnConfigAcrossRestart(t *testing.T) {
 	simulator := NewNetworkSimulator()
 	currentTime := 1000.0
