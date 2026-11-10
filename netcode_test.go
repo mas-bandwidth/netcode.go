@@ -1482,6 +1482,30 @@ func TestServerProcessPacketZerosPrivateTokenInBuffer(t *testing.T) {
 	}
 }
 
+func TestServerStopZeroesPrivateKey(t *testing.T) {
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+	server.Stop()
+
+	if server.config.PrivateKey != ([KeyBytes]byte{}) {
+		t.Fatal("Stop did not zero the server's private key")
+	}
+
+	// the key is restored from the configuration when the server starts again
+	server.Start(1)
+	if server.config.PrivateKey != testPrivateKey {
+		t.Fatal("Start did not restore the server's private key")
+	}
+}
+
 func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
 	var zeroKey [KeyBytes]byte
 
