@@ -587,7 +587,8 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		server.time,
 		expireTime,
 		connectTokenPrivate.timeoutSeconds,
-		connectTokenEntryIndex) {
+		connectTokenEntryIndex,
+		packet.connectTokenData[connectTokenPrivateBytes-MacBytes:]) {
 		printf(LogLevelDebug, "server ignored connection request. failed to add encryption mapping\n")
 		return
 	}
@@ -645,7 +646,8 @@ func (server *Server) connectClient(clientIndex int, address *Address, clientID 
 
 	connectTokenEntryIndex := server.encryptionManager.getConnectTokenEntryIndex(encryptionIndex)
 	if connectTokenEntryIndex >= 0 {
-		connectTokenEntriesConsume(&server.connectTokenEntries, connectTokenEntryIndex)
+		connectTokenEntriesConsume(&server.connectTokenEntries, connectTokenEntryIndex,
+			server.encryptionManager.getConnectTokenMac(encryptionIndex))
 	}
 
 	if logLevel >= LogLevelInfo {
