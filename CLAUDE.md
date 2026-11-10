@@ -6,8 +6,8 @@ linked from our README as a community implementation). Module path ends `.go`; t
 
 DECISIONS
 - Three version numbers live here. Exactly one of them tracks C.
-  1. Module/tag version: its own line, v1.0.0 -> v1.1.0. It does not track C's numbering.
-  2. Exported `VersionFull` "1.4.0": the C release this port corresponds to, mirroring
+  1. Module/tag version: its own line, v1.0.0 -> v1.1.4. It does not track C's numbering.
+  2. Exported `VersionFull` "1.4.9": the C release this port corresponds to, mirroring
      NETCODE_VERSION_* in C's netcode.h. It DOES track C. This was open until #11: the
      constant sat at 1.3.5 from the first commit, through C's 1.4.0 security release, so
      the library advertised a version predating a fix it already carried. CI now enforces

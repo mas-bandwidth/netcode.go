@@ -179,6 +179,12 @@ func TestAddress(t *testing.T) {
 			"...",
 			"....",
 			".....",
+			"[::1]]:80",
+			"[[::1]]",
+			"[::1]:80]",
+			"fe80::1%en0",
+			"[fe80::1%en0]",
+			"[fe80::1%en0]:40000",
 		}
 		for _, s := range badAddresses {
 			if _, err := ParseAddress(s); err == nil {
@@ -710,6 +716,107 @@ func TestConnectionDisconnectPacket(t *testing.T) {
 	check(t, outputPacket != nil)
 }
 
+func TestReadPacketRejectsInvalidPackets(t *testing.T) {
+	packetKey := GenerateKey()
+	wrongPacketKey := GenerateKey()
+	privateKey := GenerateKey()
+	wrongPrivateKey := GenerateKey()
+
+	connectTokenExpireTimestamp := testNowUnix + 30
+	connectTokenNonce := generateNonce()
+	var connectTokenData [connectTokenPrivateBytes]byte
+	check(t, encryptConnectTokenPrivate(connectTokenData[:], testProtocolID, connectTokenExpireTimestamp, connectTokenNonce[:], privateKey) == nil)
+
+	testCases := []struct {
+		name     string
+		packet   packet
+		private  []byte
+		wrongKey []byte
+	}{
+		{
+			name: "connection request",
+			packet: &connectionRequest{
+				versionInfo:                 versionInfo,
+				protocolID:                  testProtocolID,
+				connectTokenExpireTimestamp: connectTokenExpireTimestamp,
+				connectTokenNonce:           connectTokenNonce,
+				connectTokenData:            connectTokenData,
+			},
+			private:  privateKey,
+			wrongKey: wrongPrivateKey,
+		},
+		{
+			name:     "connection denied",
+			packet:   &connectionDenied{},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection challenge",
+			packet:   &connectionChallenge{challengeTokenSequence: 1000},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection response",
+			packet:   &connectionResponse{challengeTokenSequence: 1000},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection keep alive",
+			packet:   &connectionKeepAlive{clientIndex: 10, maxClients: 16},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection payload",
+			packet:   &connectionPayload{payloadData: []byte("payload")},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection disconnect",
+			packet:   &connectionDisconnect{},
+			wrongKey: wrongPacketKey,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var buffer [maxPacketBytes]byte
+			bytesWritten := writePacket(testCase.packet, buffer[:], 1000, packetKey, testProtocolID)
+			check(t, bytesWritten > 0)
+
+			allowedPackets := allPacketsAllowed()
+
+			read := func(data []byte, key []byte, protocolID uint64, privateKey []byte) packet {
+				copied := append([]byte(nil), data...)
+				var sequence uint64
+				return readPacket(copied, &sequence, key, protocolID, testNowUnix, 0, privateKey, &allowedPackets, nil)
+			}
+
+			// the unmodified packet is accepted
+
+			check(t, read(buffer[:bytesWritten], packetKey, testProtocolID, testCase.private) != nil)
+
+			// a flipped ciphertext or tag byte is refused
+
+			tampered := append([]byte(nil), buffer[:bytesWritten]...)
+			tampered[bytesWritten-1] ^= 0xFF
+			check(t, read(tampered, packetKey, testProtocolID, testCase.private) == nil)
+
+			// a wrong key is refused
+
+			if testCase.private != nil {
+				// a connection request is decrypted with the private key
+				check(t, read(buffer[:bytesWritten], packetKey, testProtocolID, testCase.wrongKey) == nil)
+			} else {
+				check(t, read(buffer[:bytesWritten], testCase.wrongKey, testProtocolID, nil) == nil)
+			}
+
+			// a wrong protocol id is refused
+
+			check(t, read(buffer[:bytesWritten], packetKey, testProtocolID+1, testCase.private) == nil)
+		})
+	}
+}
+
 func TestConnectTokenPublic(t *testing.T) {
 	// generate a private connect token
 
@@ -1039,6 +1146,87 @@ func TestReplayProtection(t *testing.T) {
 	// while packets that fell out of the window are rejected as before
 
 	check(t, replay.alreadyReceived(maxUint64-1-replayProtectionBufferSize))
+}
+
+func TestReadPacketRejectsReplay(t *testing.T) {
+	inputPacket := &connectionPayload{payloadData: []byte("replay test payload")}
+
+	var buffer [maxPacketBytes]byte
+	packetKey := GenerateKey()
+
+	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
+
+	check(t, bytesWritten > 0)
+
+	wireBytes := make([]byte, bytesWritten)
+	copy(wireBytes, buffer[:bytesWritten])
+
+	var replay replayProtection
+	replay.reset()
+
+	allowedPackets := allPacketsAllowed()
+
+	// readPacket decrypts in place, so each call gets its own copy of the same wire bytes
+
+	firstBytes := make([]byte, len(wireBytes))
+	copy(firstBytes, wireBytes)
+
+	var firstSequence uint64
+	firstPacket := readPacket(firstBytes, &firstSequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay)
+
+	check(t, firstPacket != nil)
+	check(t, firstSequence == 1000)
+
+	secondBytes := make([]byte, len(wireBytes))
+	copy(secondBytes, wireBytes)
+
+	var secondSequence uint64
+	secondPacket := readPacket(secondBytes, &secondSequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay)
+
+	check(t, secondPacket == nil)
+}
+
+func TestReadPacketIgnoresCorruptedPacket(t *testing.T) {
+	inputPacket := &connectionPayload{payloadData: []byte("corrupted packet payload")}
+
+	var buffer [maxPacketBytes]byte
+	packetKey := GenerateKey()
+
+	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
+
+	check(t, bytesWritten > 0)
+
+	wireBytes := make([]byte, bytesWritten)
+	copy(wireBytes, buffer[:bytesWritten])
+
+	var replay replayProtection
+	replay.reset()
+
+	allowedPackets := allPacketsAllowed()
+
+	// a corrupted packet at sequence 1000 must be ignored without affecting replay protection
+
+	corruptedBytes := make([]byte, len(wireBytes))
+	copy(corruptedBytes, wireBytes)
+	corruptedBytes[len(corruptedBytes)-1] ^= 0xFF
+
+	var corruptedSequence uint64
+	corruptedPacket := readPacket(corruptedBytes, &corruptedSequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay)
+
+	check(t, corruptedPacket == nil)
+	check(t, corruptedSequence == 1000)
+
+	// the authentic packet at the same sequence must still be accepted
+
+	authenticBytes := make([]byte, len(wireBytes))
+	copy(authenticBytes, wireBytes)
+
+	var sequence uint64
+	outputPacket, ok := readPacket(authenticBytes, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay).(*connectionPayload)
+
+	check(t, ok)
+	check(t, sequence == 1000)
+	check(t, bytes.Equal(outputPacket.payloadData, inputPacket.payloadData))
 }
 
 func TestRuntimeGuards(t *testing.T) {
@@ -1604,7 +1792,7 @@ func TestSocketDropSender(t *testing.T) {
 
 	conn, err := net.Dial("udp4", address)
 	check(t, err == nil)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	var gate [1]byte
 	_, err = os.Stdin.Read(gate[:])
@@ -1684,7 +1872,7 @@ func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	check(t, err == nil)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestSocketDropSender$")
 	cmd.Env = append(os.Environ(),
@@ -1872,4 +2060,99 @@ func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
 		check(t, manager.sendKey[1] == ownedSendKey)
 		check(t, manager.receiveKey[1] == ownedReceiveKey)
 	}
+}
+
+func TestSocketBufferSizeBackOff(t *testing.T) {
+	const requested = 4 * 1024 * 1024
+
+	t.Run("accepts the request on the first try", func(t *testing.T) {
+		calls := 0
+		set := func(size int) error {
+			calls++
+			if size != requested {
+				return errors.New("buffer size refused")
+			}
+			return nil
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, ok)
+		check(t, size == requested)
+		check(t, calls == 1)
+	})
+
+	t.Run("backs off by powers of two to 65536", func(t *testing.T) {
+		const accepted = 65536
+		var attempted []int
+		set := func(size int) error {
+			attempted = append(attempted, size)
+			if size == accepted {
+				return nil
+			}
+			return errors.New("buffer size refused")
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, ok)
+		check(t, size == accepted)
+
+		want := []int{
+			4 * 1024 * 1024,
+			2 * 1024 * 1024,
+			1 * 1024 * 1024,
+			512 * 1024,
+			256 * 1024,
+			128 * 1024,
+			65536,
+		}
+		check(t, len(attempted) == len(want))
+		for i := range want {
+			check(t, attempted[i] == want[i])
+		}
+	})
+
+	// A stock NetBSD refuses anything over about 227 KiB, including 256 KiB.
+	t.Run("accepts 128KiB when 256KiB is refused", func(t *testing.T) {
+		const limit = 227 * 1024
+		calls := 0
+		set := func(size int) error {
+			calls++
+			if size <= limit {
+				return nil
+			}
+			return errors.New("buffer size refused")
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, ok)
+		check(t, size == 128*1024)
+		check(t, calls == 6)
+	})
+
+	t.Run("keeps the OS default when every size is refused", func(t *testing.T) {
+		var attempted []int
+		set := func(size int) error {
+			attempted = append(attempted, size)
+			return errors.New("buffer size refused")
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, !ok)
+		check(t, size == 0)
+		check(t, len(attempted) == 7)
+		check(t, attempted[len(attempted)-1] == 65536)
+	})
+
+	t.Run("does not try a request already below 65536", func(t *testing.T) {
+		calls := 0
+		set := func(int) error {
+			calls++
+			return nil
+		}
+
+		size, ok := setSocketBufferSize(32*1024, set)
+		check(t, !ok)
+		check(t, size == 0)
+		check(t, calls == 0)
+	})
 }

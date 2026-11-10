@@ -41,7 +41,7 @@ type ServerConfig struct {
 
 	// MaxConnectTokenLifetime is the longest lifetime in seconds that the backend
 	// issues connect tokens with. The server ignores any connection request whose
-	// connect token expire timestamp is earlier than the server start time plus
+	// connect token expire timestamp is at or before the server start time plus
 	// this lifetime, preventing replays of connect tokens issued before the server
 	// started. If <= 0, DefaultMaxConnectTokenLifetime (30) is used.
 	MaxConnectTokenLifetime int
@@ -509,7 +509,7 @@ func (server *Server) findClientIndexByAddress(address *Address) int {
 	return -1
 }
 
-func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest) {
+func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest, currentTimestamp uint64) {
 	defer clear(packet.connectTokenData[:])
 
 	var connectTokenPrivate connectTokenPrivate
@@ -547,8 +547,6 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
-	currentTimestamp := nowUnix()
-
 	connectTokenEntryIndex := connectTokenEntriesFindOrAdd(&server.connectTokenEntries,
 		from,
 		packet.connectTokenData[connectTokenPrivateBytes-MacBytes:],
@@ -572,7 +570,12 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
-	expireTime := -1.0
+	tokenLifetime := packet.connectTokenExpireTimestamp - currentTimestamp
+	if packet.connectTokenExpireTimestamp == 0xFFFFFFFFFFFFFFFF {
+		tokenLifetime = uint64(server.config.MaxConnectTokenLifetime)
+	}
+
+	expireTime := server.time + float64(tokenLifetime)
 	if connectTokenPrivate.timeoutSeconds >= 0 {
 		expireTime = server.time + float64(connectTokenPrivate.timeoutSeconds)
 	}
@@ -701,14 +704,14 @@ func (server *Server) processConnectionResponsePacket(from *Address, packet *con
 	server.connectClient(clientIndex, from, challengeToken.clientID, encryptionIndex, timeoutSeconds, challengeToken.userData[:])
 }
 
-func (server *Server) processPacketInternal(from *Address, p packet, sequence uint64, encryptionIndex int, clientIndex int) {
+func (server *Server) processPacketInternal(from *Address, p packet, sequence uint64, encryptionIndex int, clientIndex int, currentTimestamp uint64) {
 	switch t := p.(type) {
 	case *connectionRequest:
 		if server.flags&serverFlagIgnoreConnectionRequestPackets == 0 {
 			if logLevel >= LogLevelDebug {
 				printf(LogLevelDebug, "server received connection request from %s\n", from.String())
 			}
-			server.processConnectionRequestPacket(from, t)
+			server.processConnectionRequestPacket(from, t, currentTimestamp)
 		}
 
 	case *connectionResponse:
@@ -817,7 +820,7 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 		return
 	}
 
-	server.processPacketInternal(from, packet, sequence, encryptionIndex, clientIndex)
+	server.processPacketInternal(from, packet, sequence, encryptionIndex, clientIndex, currentTimestamp)
 }
 
 func (server *Server) receivePackets() {
@@ -1075,6 +1078,7 @@ func (server *Server) MaxClients() int {
 // Update advances the server to the given time: it receives and processes
 // packets, sends keep-alive packets, and times out clients. Call it regularly,
 // for example 60 times per second.
+// time must be monotonically non-decreasing across calls.
 func (server *Server) Update(time float64) {
 	server.time = time
 	server.receivePackets()
