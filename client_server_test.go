@@ -690,8 +690,12 @@ func TestClientErrorInvalidConnectToken(t *testing.T) {
 }
 
 func TestClientServerAddressFamilySelection(t *testing.T) {
+	const clientTime = 1000.0
+	const createTimestamp = uint64(clientTime)
+	const expireTimestamp = createTimestamp + uint64(testConnectTokenExpiry)
+
 	newSingleFamilyClient := func(ipv4, ipv6 bool) *Client {
-		client, err := NewClient("127.0.0.1:50000", &ClientConfig{OverrideSendAndReceive: true}, 0.0)
+		client, err := NewClient("127.0.0.1:50000", &ClientConfig{OverrideSendAndReceive: true}, clientTime)
 		check(t, err == nil)
 		client.config.OverrideSendAndReceive = false
 		if ipv4 {
@@ -703,11 +707,42 @@ func TestClientServerAddressFamilySelection(t *testing.T) {
 		return client
 	}
 
+	newConnectToken := func(serverAddresses []string, timeoutSeconds int) []byte {
+		addresses := make([]Address, len(serverAddresses))
+		for i, serverAddress := range serverAddresses {
+			address, err := ParseAddress(serverAddress)
+			check(t, err == nil)
+			addresses[i] = address
+		}
+
+		tokenPrivate := generateConnectTokenPrivate(randomUint64(), int32(timeoutSeconds), addresses, nil)
+		var privateData [connectTokenPrivateBytes]byte
+		tokenPrivate.write(privateData[:])
+
+		var nonce [connectTokenNonceBytes]byte
+		check(t, encryptConnectTokenPrivate(privateData[:], testProtocolID, expireTimestamp, nonce[:], testPrivateKey[:]) == nil)
+
+		token := connectToken{
+			protocolID:         testProtocolID,
+			createTimestamp:    createTimestamp,
+			expireTimestamp:    expireTimestamp,
+			nonce:              nonce,
+			privateData:        privateData,
+			timeoutSeconds:     int32(timeoutSeconds),
+			numServerAddresses: len(addresses),
+			clientToServerKey:  tokenPrivate.clientToServerKey,
+			serverToClientKey:  tokenPrivate.serverToClientKey,
+		}
+		copy(token.serverAddresses[:], addresses)
+
+		buffer := make([]byte, ConnectTokenBytes)
+		token.write(buffer)
+		return buffer
+	}
+
 	{
 		client := newSingleFamilyClient(true, false)
-		token, err := GenerateConnectToken([]string{"[::1]:40000"}, []string{"[::1]:40000"},
-			testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
-		check(t, err == nil)
+		token := newConnectToken([]string{"[::1]:40000"}, testTimeoutSeconds)
 
 		client.Connect(token)
 		check(t, client.State() == ClientStateInvalidConnectToken)
@@ -715,9 +750,7 @@ func TestClientServerAddressFamilySelection(t *testing.T) {
 
 	{
 		client := newSingleFamilyClient(false, true)
-		token, err := GenerateConnectToken([]string{"127.0.0.1:40000"}, []string{"127.0.0.1:40000"},
-			testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
-		check(t, err == nil)
+		token := newConnectToken([]string{"127.0.0.1:40000"}, testTimeoutSeconds)
 
 		client.Connect(token)
 		check(t, client.State() == ClientStateInvalidConnectToken)
@@ -725,10 +758,7 @@ func TestClientServerAddressFamilySelection(t *testing.T) {
 
 	{
 		client := newSingleFamilyClient(true, false)
-		addrs := []string{"[::1]:40000", "127.0.0.1:40001"}
-		token, err := GenerateConnectToken(addrs, addrs,
-			testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
-		check(t, err == nil)
+		token := newConnectToken([]string{"[::1]:40000", "127.0.0.1:40001"}, testTimeoutSeconds)
 
 		client.Connect(token)
 		check(t, client.State() == ClientStateSendingConnectionRequest)
@@ -738,10 +768,7 @@ func TestClientServerAddressFamilySelection(t *testing.T) {
 
 	{
 		client := newSingleFamilyClient(true, false)
-		addrs := []string{"127.0.0.1:40000", "[::1]:40001", "127.0.0.1:40002", "[::1]:40003"}
-		token, err := GenerateConnectToken(addrs, addrs,
-			testConnectTokenExpiry, 1, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
-		check(t, err == nil)
+		token := newConnectToken([]string{"127.0.0.1:40000", "[::1]:40001", "127.0.0.1:40002", "[::1]:40003"}, 1)
 
 		client.Connect(token)
 		check(t, client.State() == ClientStateSendingConnectionRequest)
