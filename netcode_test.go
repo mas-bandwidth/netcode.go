@@ -1930,6 +1930,258 @@ func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 	}
 }
 
+func TestServerProcessPacketZerosPrivateTokenInBuffer(t *testing.T) {
+	serverAddress, err := ParseAddress("127.0.0.1:40000")
+	check(t, err == nil)
+	clientAddress, err := ParseAddress("127.0.0.1:50000")
+	check(t, err == nil)
+
+	userData := make([]byte, UserDataBytes)
+	RandomBytes(userData)
+	inputToken := generateConnectTokenPrivate(testClientID, testTimeoutSeconds, []Address{serverAddress}, userData)
+
+	var encryptedConnectTokenData [connectTokenPrivateBytes]byte
+	inputToken.write(encryptedConnectTokenData[:])
+
+	// far in the future, so the request is never refused as expired before it is decrypted
+	connectTokenExpireTimestamp := uint64(1) << 62
+	connectTokenNonce := generateNonce()
+	check(t, encryptConnectTokenPrivate(encryptedConnectTokenData[:], testProtocolID, connectTokenExpireTimestamp, connectTokenNonce[:], testPrivateKey[:]) == nil)
+
+	requestPacket := &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  testProtocolID,
+		connectTokenExpireTimestamp: connectTokenExpireTimestamp,
+		connectTokenNonce:           connectTokenNonce,
+		connectTokenData:            encryptedConnectTokenData,
+	}
+
+	var rawBuffer [maxPacketBytes]byte
+	bytesWritten := writePacket(requestPacket, rawBuffer[:], 0, nil, testProtocolID)
+	check(t, bytesWritten > 0)
+	packetBuffer := rawBuffer[:bytesWritten]
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 1000.0)
+	check(t, err == nil)
+	defer server.Close()
+	server.Start(1)
+	server.minConnectTokenExpireTimestamp = 0
+
+	server.ProcessPacket(&clientAddress, packetBuffer)
+
+	// the request was decrypted and accepted, so the check below is not vacuous
+	check(t, server.encryptionManager.findEncryptionMapping(&clientAddress, server.time) != -1)
+
+	if bytes.Contains(packetBuffer, inputToken.clientToServerKey[:]) {
+		t.Fatal("clientToServerKey remained in caller packetBuffer after Server.ProcessPacket")
+	}
+	if bytes.Contains(packetBuffer, inputToken.serverToClientKey[:]) {
+		t.Fatal("serverToClientKey remained in caller packetBuffer after Server.ProcessPacket")
+	}
+}
+
+func TestServerStopZeroesPrivateKey(t *testing.T) {
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+	server.Stop()
+
+	if server.config.PrivateKey != ([KeyBytes]byte{}) {
+		t.Fatal("Stop did not zero the server's private key")
+	}
+
+	// the key is restored from the configuration when the server starts again
+	server.Start(1)
+	if server.config.PrivateKey != testPrivateKey {
+		t.Fatal("Start did not restore the server's private key")
+	}
+}
+
+func TestServerIgnoredConnectionRequestClearsTokenData(t *testing.T) {
+	serverAddress, err := ParseAddress("127.0.0.1:40000")
+	check(t, err == nil)
+	clientAddress, err := ParseAddress("127.0.0.1:50000")
+	check(t, err == nil)
+
+	userData := make([]byte, UserDataBytes)
+	RandomBytes(userData)
+	inputToken := generateConnectTokenPrivate(testClientID, testTimeoutSeconds, []Address{serverAddress}, userData)
+
+	var connectTokenData [connectTokenPrivateBytes]byte
+	inputToken.write(connectTokenData[:])
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 1000.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.flags = serverFlagIgnoreConnectionRequestPackets
+
+	request := &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  testProtocolID,
+		connectTokenExpireTimestamp: uint64(1) << 62,
+		connectTokenData:            connectTokenData,
+	}
+	server.processPacketInternal(&clientAddress, request, 0, -1, -1, 0)
+
+	if bytes.Contains(request.connectTokenData[:], inputToken.clientToServerKey[:]) {
+		t.Fatal("clientToServerKey remained in an ignored connection request")
+	}
+	if bytes.Contains(request.connectTokenData[:], inputToken.serverToClientKey[:]) {
+		t.Fatal("serverToClientKey remained in an ignored connection request")
+	}
+}
+
+func TestServerStopBeforeStartZeroesPrivateKey(t *testing.T) {
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Stop()
+
+	if server.config.PrivateKey != ([KeyBytes]byte{}) {
+		t.Fatal("Stop before Start did not zero the server's private key")
+	}
+}
+
+func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
+	var zeroKey [KeyBytes]byte
+
+	address := func(port uint16) Address {
+		return Address{Type: AddressIPv4, IPv4: [4]byte{127, 0, 0, 1}, Port: port}
+	}
+
+	currentTime := 1000.0
+	expiredTime := currentTime + testTimeoutSeconds*2
+
+	// removing the last mapping trims the expired, unowned mappings behind it.
+	// a mapping owned by a connected client is never trimmed and keeps its keys.
+	{
+		var manager encryptionManager
+		manager.reset()
+
+		addresses := []Address{address(20000), address(20001), address(20002)}
+		for i := range addresses {
+			check(t, manager.addEncryptionMapping(&addresses[i], GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		}
+		manager.clientIndex[0] = 0
+		ownedSendKey := manager.sendKey[0]
+		ownedReceiveKey := manager.receiveKey[0]
+
+		check(t, manager.removeEncryptionMapping(&addresses[2], expiredTime))
+		check(t, manager.numEncryptionMappings == 1)
+
+		for i := 1; i < len(addresses); i++ {
+			if manager.sendKey[i] != zeroKey || manager.receiveKey[i] != zeroKey {
+				t.Fatalf("keys of trimmed encryption mapping %d were not zeroed", i)
+			}
+		}
+		check(t, manager.sendKey[0] == ownedSendKey)
+		check(t, manager.receiveKey[0] == ownedReceiveKey)
+	}
+
+	// looking up an expired, unowned mapping zeros its keys. an owned one keeps them.
+	{
+		var manager encryptionManager
+		manager.reset()
+
+		unowned := address(30000)
+		owned := address(30001)
+		check(t, manager.addEncryptionMapping(&unowned, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		check(t, manager.addEncryptionMapping(&owned, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		manager.clientIndex[1] = 0
+		ownedSendKey := manager.sendKey[1]
+		ownedReceiveKey := manager.receiveKey[1]
+
+		check(t, manager.findEncryptionMapping(&unowned, expiredTime) == -1)
+		check(t, manager.findEncryptionMapping(&owned, expiredTime) == -1)
+
+		if manager.sendKey[0] != zeroKey || manager.receiveKey[0] != zeroKey {
+			t.Fatal("keys of expired encryption mapping were not zeroed on lookup")
+		}
+		check(t, manager.sendKey[1] == ownedSendKey)
+		check(t, manager.receiveKey[1] == ownedReceiveKey)
+	}
+
+	// looking up or adding a different address zeros the keys of every expired, unowned mapping.
+	// an add reuses the first expired slot, so the check is on the second one.
+	for _, add := range []bool{false, true} {
+		var manager encryptionManager
+		manager.reset()
+
+		first := address(40000)
+		second := address(40001)
+		owned := address(40002)
+		other := address(40003)
+		check(t, manager.addEncryptionMapping(&first, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		check(t, manager.addEncryptionMapping(&second, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		check(t, manager.addEncryptionMapping(&owned, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		manager.clientIndex[2] = 0
+		ownedSendKey := manager.sendKey[2]
+		ownedReceiveKey := manager.receiveKey[2]
+
+		if add {
+			check(t, manager.addEncryptionMapping(&other, GenerateKey(), GenerateKey(), expiredTime, -1.0, testTimeoutSeconds, -1))
+			check(t, manager.address[0].Equal(other))
+		} else {
+			check(t, manager.findEncryptionMapping(&other, expiredTime) == -1)
+			if manager.sendKey[0] != zeroKey || manager.receiveKey[0] != zeroKey {
+				t.Fatal("keys of expired encryption mapping were not zeroed on lookup of another address")
+			}
+		}
+
+		if manager.sendKey[1] != zeroKey || manager.receiveKey[1] != zeroKey {
+			t.Fatalf("keys of expired encryption mapping were not zeroed (add=%v)", add)
+		}
+		check(t, manager.sendKey[2] == ownedSendKey)
+		check(t, manager.receiveKey[2] == ownedReceiveKey)
+	}
+
+	// the server's update zeros the keys of expired, unowned mappings with no lookups at all.
+	{
+		serverConfig := &ServerConfig{
+			ProtocolID:       testProtocolID,
+			PrivateKey:       testPrivateKey,
+			NetworkSimulator: NewNetworkSimulator(),
+		}
+		server, err := NewServer("127.0.0.1:40000", serverConfig, currentTime)
+		check(t, err == nil)
+		defer server.Close()
+		server.Start(1)
+
+		expired := address(50000)
+		check(t, server.encryptionManager.addEncryptionMapping(&expired, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+
+		server.Update(expiredTime)
+
+		if server.encryptionManager.sendKey[0] != zeroKey || server.encryptionManager.receiveKey[0] != zeroKey {
+			t.Fatal("keys of expired encryption mapping were not zeroed by the server update")
+		}
+	}
+}
+
 func TestSocketBufferSizeBackOff(t *testing.T) {
 	const requested = 4 * 1024 * 1024
 

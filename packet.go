@@ -262,7 +262,9 @@ func readPacket(buffer []byte,
 			connectTokenExpireTimestamp: packetConnectTokenExpireTimestamp,
 			connectTokenNonce:           packetConnectTokenNonce,
 		}
+		privateTokenSlice := buffer[r.pos : r.pos+connectTokenPrivateBytes]
 		r.bytes(request.connectTokenData[:])
+		clear(privateTokenSlice)
 
 		return request
 	}
