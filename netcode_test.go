@@ -3,11 +3,14 @@ package netcode
 import (
 	"bytes"
 	"errors"
+	"math"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,7 +23,24 @@ const (
 	testServerPort         = 40000
 	testConnectTokenExpiry = 30
 	testTimeoutSeconds     = 15
+
+	// testNowUnix is the fixed Unix time used by the unit tests, so token
+	// timestamps do not depend on the wall clock.
+	testNowUnix = uint64(1700000000)
 )
+
+// TestMain pins the clock for the unit tests. The C interoperability tests run
+// the reference implementation in another process with the real clock, so
+// leave the clock alone when they are enabled.
+func TestMain(m *testing.M) {
+	previousNowUnix := nowUnix
+	if os.Getenv("NETCODE_C_BIN_DIR") == "" {
+		nowUnix = func() uint64 { return testNowUnix }
+	}
+	code := m.Run()
+	nowUnix = previousNowUnix
+	os.Exit(code)
+}
 
 var testPrivateKey = [KeyBytes]byte{
 	0x60, 0x6a, 0xbe, 0x6e, 0xc9, 0x19, 0x10, 0xea,
@@ -33,6 +53,19 @@ func check(t *testing.T, condition bool) {
 	t.Helper()
 	if !condition {
 		t.Fatal("check failed")
+	}
+}
+
+func testSendPacketOverride(to *Address, packetData []byte) {}
+
+func testReceivePacketOverride() (packetData []byte, from Address, ok bool) {
+	return nil, Address{}, false
+}
+
+func requireFunctional(t *testing.T) {
+	t.Helper()
+	if os.Getenv("NETCODE_FUNCTIONAL_TESTS") != "1" {
+		t.Skip("set NETCODE_FUNCTIONAL_TESTS=1 to run tests that use real sockets")
 	}
 }
 
@@ -373,7 +406,7 @@ func TestConnectToken(t *testing.T) {
 
 	// encrypt the buffer
 
-	expireTimestamp := uint64(time.Now().Unix()) + 30
+	expireTimestamp := testNowUnix + 30
 	nonce := generateNonce()
 	key := GenerateKey()
 
@@ -465,7 +498,7 @@ func TestConnectionRequestPacket(t *testing.T) {
 
 	encryptedConnectTokenData := connectTokenData
 
-	connectTokenExpireTimestamp := uint64(time.Now().Unix()) + 30
+	connectTokenExpireTimestamp := testNowUnix + 30
 	connectTokenNonce := generateNonce()
 	connectTokenKey := GenerateKey()
 
@@ -495,7 +528,7 @@ func TestConnectionRequestPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, connectTokenKey, &allowedPackets, nil).(*connectionRequest)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, connectTokenKey, &allowedPackets, nil).(*connectionRequest)
 
 	check(t, ok)
 
@@ -527,7 +560,7 @@ func TestConnectionDeniedPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionDenied)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionDenied)
 
 	check(t, ok)
 	check(t, outputPacket != nil)
@@ -555,7 +588,7 @@ func TestConnectionChallengePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionChallenge)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionChallenge)
 
 	check(t, ok)
 
@@ -586,7 +619,7 @@ func TestConnectionResponsePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionResponse)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionResponse)
 
 	check(t, ok)
 
@@ -618,7 +651,7 @@ func TestConnectionKeepAlivePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionKeepAlive)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionKeepAlive)
 
 	check(t, ok)
 
@@ -648,7 +681,7 @@ func TestConnectionPayloadPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionPayload)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionPayload)
 
 	check(t, ok)
 
@@ -676,7 +709,7 @@ func TestConnectionDisconnectPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionDisconnect)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionDisconnect)
 
 	check(t, ok)
 	check(t, outputPacket != nil)
@@ -704,7 +737,7 @@ func TestConnectTokenPublic(t *testing.T) {
 
 	// encrypt the buffer
 
-	createTimestamp := uint64(time.Now().Unix())
+	createTimestamp := testNowUnix
 	expireTimestamp := createTimestamp + 30
 	connectTokenNonce := generateNonce()
 	key := GenerateKey()
@@ -746,6 +779,51 @@ func TestConnectTokenPublic(t *testing.T) {
 	check(t, outputConnectToken.clientToServerKey == inputConnectToken.clientToServerKey)
 	check(t, outputConnectToken.serverToClientKey == inputConnectToken.serverToClientKey)
 	check(t, outputConnectToken.timeoutSeconds == inputConnectToken.timeoutSeconds)
+}
+
+func TestGenerateConnectTokenUsesInjectedClock(t *testing.T) {
+	const injectedNow = uint64(1234567890)
+
+	previousNowUnix := nowUnix
+	nowUnix = func() uint64 { return injectedNow }
+	defer func() { nowUnix = previousNowUnix }()
+
+	serverAddress := testServerAddress()
+
+	connectTokenData, err := GenerateConnectToken(
+		[]string{serverAddress.String()},
+		[]string{serverAddress.String()},
+		testConnectTokenExpiry,
+		testTimeoutSeconds,
+		testClientID,
+		testProtocolID,
+		testPrivateKey[:],
+		nil,
+	)
+	check(t, err == nil)
+
+	var token connectToken
+	check(t, token.read(connectTokenData) == nil)
+	check(t, token.createTimestamp == injectedNow)
+	check(t, token.expireTimestamp == injectedNow+testConnectTokenExpiry)
+}
+
+func TestGenerateConnectTokenRejectsOutOfRangeTimeout(t *testing.T) {
+	serverAddress := testServerAddress()
+
+	for _, timeoutSeconds := range []int{math.MaxInt32 + 1, math.MinInt32 - 1} {
+		_, err := GenerateConnectToken(
+			[]string{serverAddress.String()},
+			[]string{serverAddress.String()},
+			testConnectTokenExpiry,
+			timeoutSeconds,
+			testClientID,
+			testProtocolID,
+			testPrivateKey[:],
+			nil,
+		)
+		check(t, err != nil)
+	}
 }
 
 func TestEncryptionManager(t *testing.T) {
@@ -973,7 +1051,7 @@ func TestRuntimeGuards(t *testing.T) {
 
 	// no private key needed: nothing in this test decrypts anything
 
-	serverConfig := &ServerConfig{ProtocolID: testProtocolID}
+	serverConfig := &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}
 
 	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
 	check(t, err == nil)
@@ -1034,7 +1112,45 @@ func TestRuntimeGuards(t *testing.T) {
 	check(t, server.NumConnectedClients() == 0)
 }
 
+func TestConnectLoopbackClientRequiresSendLoopbackPacketCallback(t *testing.T) {
+	// a loopback connection needs a send callback, so without one it must be
+	// refused rather than accepted in a half-connected state
+
+	serverConfig := &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}
+
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 1000.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	server.ConnectLoopbackClient(0, testClientID, nil)
+
+	server.SendPacket(0, []byte{1})
+
+	check(t, !server.ClientLoopback(0))
+	check(t, !server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 0)
+}
+
+func TestConnectLoopbackRequiresSendLoopbackPacketCallback(t *testing.T) {
+	// a loopback connection needs a send callback, so without one the client
+	// must stay disconnected
+
+	client, err := NewClient("127.0.0.1:50000", &ClientConfig{OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}, 1000.0)
+	check(t, err == nil)
+	defer client.Close()
+
+	client.ConnectLoopback(0, 1)
+
+	client.SendPacket([]byte{1})
+
+	check(t, !client.Loopback())
+	check(t, client.State() == ClientStateDisconnected)
+}
+
 func TestInitAndDefaults(t *testing.T) {
+	requireFunctional(t)
 	// a nil config must give working defaults instead of crashing
 
 	{
@@ -1053,6 +1169,7 @@ func TestInitAndDefaults(t *testing.T) {
 }
 
 func TestClientCreateError(t *testing.T) {
+	requireFunctional(t)
 	// successful create returns no error
 
 	{
@@ -1114,6 +1231,7 @@ func TestClientCreateError(t *testing.T) {
 }
 
 func TestServerCreateError(t *testing.T) {
+	requireFunctional(t)
 	// successful create returns no error
 
 	{
@@ -1162,6 +1280,132 @@ func TestServerCreateError(t *testing.T) {
 		check(t, server == nil)
 		check(t, errors.Is(err, ErrServerBindSocketIPv6Failed))
 	}()
+}
+
+func TestClientCreateRequiresOverrideCallbacks(t *testing.T) {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false }
+
+	cases := []struct {
+		name    string
+		address string
+		config  *ClientConfig
+	}{
+		{"neither callback", "0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true}},
+		{"missing send callback", "0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true, ReceivePacketOverride: receive}},
+		{"missing receive callback", "0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true, SendPacketOverride: send}},
+		{"callbacks checked before address", "not an address", &ClientConfig{OverrideSendAndReceive: true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := NewClient(tc.address, tc.config, 0.0)
+			check(t, client == nil)
+			check(t, errors.Is(err, ErrClientOverrideCallbacksRequired))
+		})
+	}
+
+	// both callbacks supplied creates successfully
+
+	client, err := NewClient("0.0.0.0:0", &ClientConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     send,
+		ReceivePacketOverride:  receive,
+	}, 0.0)
+	check(t, err == nil)
+	check(t, client != nil)
+	client.Close()
+}
+
+func TestServerCreateRequiresOverrideCallbacks(t *testing.T) {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false }
+
+	cases := []struct {
+		name    string
+		address string
+		config  *ServerConfig
+	}{
+		{"neither callback", "127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true}},
+		{"missing send callback", "127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true, ReceivePacketOverride: receive}},
+		{"missing receive callback", "127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true, SendPacketOverride: send}},
+		{"callbacks checked before address", "not an address", &ServerConfig{OverrideSendAndReceive: true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, err := NewServer(tc.address, tc.config, 0.0)
+			check(t, server == nil)
+			check(t, errors.Is(err, ErrServerOverrideCallbacksRequired))
+		})
+	}
+
+	// both callbacks supplied creates successfully
+
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     send,
+		ReceivePacketOverride:  receive,
+	}, 0.0)
+	check(t, err == nil)
+	check(t, server != nil)
+	server.Close()
+}
+
+func TestOverrideCallbacksRequiredErrorNamesCallbacks(t *testing.T) {
+	// the creation error should say which callbacks are required
+
+	checkMessage := func(t *testing.T, err error) {
+		t.Helper()
+		check(t, err != nil)
+		if err == nil {
+			return
+		}
+		check(t, strings.Contains(err.Error(), "SendPacketOverride"))
+		check(t, strings.Contains(err.Error(), "ReceivePacketOverride"))
+	}
+
+	client, err := NewClient("0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true}, 0.0)
+	check(t, client == nil)
+	checkMessage(t, err)
+
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true}, 0.0)
+	check(t, server == nil)
+	checkMessage(t, err)
+}
+
+func TestOverrideCallbacksRequiredWithNetworkSimulator(t *testing.T) {
+	// the network simulator replaces sockets, but not the override callbacks
+
+	client, err := NewClient("127.0.0.1:40000", &ClientConfig{
+		OverrideSendAndReceive: true,
+		NetworkSimulator:       NewNetworkSimulator(),
+	}, 0.0)
+	check(t, client == nil)
+	check(t, errors.Is(err, ErrClientOverrideCallbacksRequired))
+
+	server, err := NewServer("127.0.0.1:40000", &ServerConfig{
+		OverrideSendAndReceive: true,
+		NetworkSimulator:       NewNetworkSimulator(),
+	}, 0.0)
+	check(t, server == nil)
+	check(t, errors.Is(err, ErrServerOverrideCallbacksRequired))
+
+	// with the flag off, nil callbacks are accepted
+
+	client, err = NewClient("127.0.0.1:40000", &ClientConfig{
+		NetworkSimulator: NewNetworkSimulator(),
+	}, 0.0)
+	check(t, err == nil)
+	check(t, client != nil)
+	client.Close()
+
+	server, err = NewServer("127.0.0.1:40000", &ServerConfig{
+		NetworkSimulator: NewNetworkSimulator(),
+	}, 0.0)
+	check(t, err == nil)
+	check(t, server != nil)
+	server.Close()
 }
 
 func TestNetworkSimulatorDeterminism(t *testing.T) {
@@ -1220,6 +1464,7 @@ func TestNetworkSimulatorDeterminism(t *testing.T) {
 }
 
 func TestClientCreate(t *testing.T) {
+	requireFunctional(t)
 	{
 		client, err := NewClient("127.0.0.1:40000", nil, 0.0)
 		check(t, err == nil)
@@ -1274,6 +1519,7 @@ func TestClientCreate(t *testing.T) {
 }
 
 func TestServerCreate(t *testing.T) {
+	requireFunctional(t)
 	{
 		server, err := NewServer("127.0.0.1:40000", nil, 0.0)
 		check(t, err == nil)
@@ -1328,7 +1574,7 @@ func TestServerCreate(t *testing.T) {
 }
 
 func TestServerUnknownAddressDoesNotAllocateWhenLoggingOff(t *testing.T) {
-	server, err := NewServer("127.0.0.1:0", &ServerConfig{ProtocolID: testProtocolID}, 0.0)
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}, 0.0)
 	check(t, err == nil)
 	defer server.Close()
 
@@ -1376,7 +1622,69 @@ func TestSocketDropSender(t *testing.T) {
 	}
 }
 
+// failingSocketReader fails every read until failures run out, then reports
+// the socket closed so the reader goroutine exits.
+type failingSocketReader struct {
+	failures int
+}
+
+func (r *failingSocketReader) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
+	if r.failures == 0 {
+		return 0, netip.AddrPort{}, net.ErrClosed
+	}
+	r.failures--
+	return 0, netip.AddrPort{}, errors.New("read failed")
+}
+
+func TestSocketReadErrorsLogWhileLoggingIsConfigured(t *testing.T) {
+	const failures = 1000
+
+	previousLogLevel := logLevel
+	previousPrintfFunction := printfFunction
+	defer func() {
+		SetLogLevel(previousLogLevel)
+		SetPrintfFunction(previousPrintfFunction)
+	}()
+
+	logged := 0
+	countLogs := func(format string, args ...any) { logged++ }
+
+	backoffs := 0
+	countBackoffs := func(time.Duration) { backoffs++ }
+
+	s := &socket{packets: make(chan receivedPacket, failures)}
+	done := make(chan struct{})
+	go func() {
+		s.readLoop(&failingSocketReader{failures: failures}, countBackoffs)
+		close(done)
+	}()
+
+	for running := true; running; {
+		select {
+		case <-done:
+			running = false
+		default:
+		}
+		SetLogLevel(LogLevelError)
+		SetPrintfFunction(countLogs)
+		s.receivePacket()
+	}
+	for {
+		if _, ok := s.receivePacket(); !ok {
+			break
+		}
+	}
+
+	if logged != failures {
+		t.Fatalf("%d socket read errors were logged %d times", failures, logged)
+	}
+	if backoffs != failures {
+		t.Fatalf("%d socket read errors backed off %d times", failures, backoffs)
+	}
+}
+
 func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
+	requireFunctional(t)
 	const datagrams = 2000
 
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -1399,7 +1707,7 @@ func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 	}()
 
 	s := &socket{conn: conn, packets: make(chan receivedPacket)}
-	go s.readLoop()
+	go s.readLoop(conn, time.Sleep)
 
 	var before, after runtime.MemStats
 
