@@ -346,6 +346,12 @@ func (client *Client) processPacketInternal(from *Address, p packet, sequence ui
 // ClientConfig.OverrideSendAndReceive to drive the client with your own
 // transport.
 func (client *Client) ProcessPacket(from *Address, packetData []byte) {
+	// check the source address first, so a packet from any other address cannot advance replay protection
+
+	if !from.Equal(client.serverAddress) {
+		return
+	}
+
 	allowedPackets := [connectionNumPackets]bool{}
 	allowedPackets[connectionDeniedPacket] = true
 	allowedPackets[connectionChallengePacket] = true

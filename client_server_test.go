@@ -2164,6 +2164,60 @@ func TestPacketTagging(t *testing.T) {
 	}
 }
 
+func TestClientPacketFromOtherAddressLeavesReplayProtection(t *testing.T) {
+	client, err := NewClient("127.0.0.1:50000", &ClientConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     testSendPacketOverride,
+		ReceivePacketOverride:  testReceivePacketOverride,
+	}, 0.0)
+	check(t, err == nil)
+	defer client.Close()
+
+	packetKey := GenerateKey()
+	copy(client.readPacketKey[:], packetKey)
+	client.hasPacketKeys = true
+	client.connectToken.protocolID = testProtocolID
+
+	// the connected client sends disconnect packets when closed, so give it its own write key
+	copy(client.writePacketKey[:], GenerateKey())
+
+	serverAddress, err := ParseAddress("127.0.0.1:40000")
+	check(t, err == nil)
+	otherAddress, err := ParseAddress("127.0.0.1:40001")
+	check(t, err == nil)
+	client.serverAddress = serverAddress
+
+	client.clientIndex = 0
+	client.maxClients = 1
+
+	client.setState(ClientStateConnected)
+
+	mostRecentSequence := client.replayProtection.mostRecentSequence
+
+	packet := &connectionKeepAlive{clientIndex: 0, maxClients: 1}
+
+	var buffer [maxPacketBytes]byte
+
+	// a packet that authenticates under the client's key, but comes from another address,
+	// must not move the client's replay protection
+	bytesWritten := writePacket(packet, buffer[:], 1000000, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	client.ProcessPacket(&otherAddress, buffer[:bytesWritten])
+
+	check(t, client.replayProtection.mostRecentSequence == mostRecentSequence)
+
+	// and the client still accepts the next packet from its server
+	client.time = 10.0
+
+	bytesWritten = writePacket(packet, buffer[:], 1, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	client.ProcessPacket(&serverAddress, buffer[:bytesWritten])
+
+	check(t, client.lastPacketReceiveTime == 10.0)
+}
+
 func TestKeepAliveRejectsOutOfRangeIndexAndMaxClients(t *testing.T) {
 	serverAddress := Address{Type: AddressIPv4, IPv4: [4]byte{127, 0, 0, 1}, Port: 40000}
 	cases := []struct {
