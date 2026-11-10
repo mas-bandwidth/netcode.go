@@ -1332,6 +1332,13 @@ func TestConnectLoopbackRequiresSendLoopbackPacketCallback(t *testing.T) {
 	check(t, client.State() == ClientStateDisconnected)
 }
 
+func TestVersionConstants(t *testing.T) {
+	check(t, VersionMajor == 1)
+	check(t, VersionMinor == 4)
+	check(t, VersionPatch == 9)
+	check(t, VersionFull == "1.4.9")
+}
+
 func TestInitAndDefaults(t *testing.T) {
 	requireFunctional(t)
 	// a nil config must give working defaults instead of crashing
