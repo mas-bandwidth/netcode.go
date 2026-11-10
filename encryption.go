@@ -15,6 +15,7 @@ type encryptionManager struct {
 	address                [maxEncryptionMappings]Address
 	clientIndex            [maxEncryptionMappings]int
 	connectTokenEntryIndex [maxEncryptionMappings]int
+	connectTokenMac        [maxEncryptionMappings][MacBytes]byte
 	sendKey                [maxEncryptionMappings][KeyBytes]byte
 	receiveKey             [maxEncryptionMappings][KeyBytes]byte
 }
@@ -27,6 +28,7 @@ func (m *encryptionManager) reset() {
 	for i := 0; i < maxEncryptionMappings; i++ {
 		m.clientIndex[i] = -1
 		m.connectTokenEntryIndex[i] = -1
+		m.connectTokenMac[i] = [MacBytes]byte{}
 		m.expireTime[i] = -1.0
 		m.lastAccessTime[i] = -1000.0
 		m.address[i] = Address{}
@@ -41,13 +43,16 @@ func (m *encryptionManager) entryExpired(index int, time float64) bool {
 		(m.expireTime[index] >= 0.0 && m.expireTime[index] < time)
 }
 
-func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, receiveKey []byte, time, expireTime float64, timeout int32, connectTokenEntryIndex int) bool {
+func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, receiveKey []byte, time, expireTime float64, timeout int32, connectTokenEntryIndex int, tokenMac ...[]byte) bool {
+	m.clearExpiredKeys(time)
+
 	for i := 0; i < m.numEncryptionMappings; i++ {
 		if m.address[i].Equal(*address) && !m.entryExpired(i, time) {
 			m.timeout[i] = timeout
 			m.expireTime[i] = expireTime
 			m.lastAccessTime[i] = time
 			m.connectTokenEntryIndex[i] = connectTokenEntryIndex
+			m.setConnectTokenMac(i, tokenMac)
 			copy(m.sendKey[i][:], sendKey)
 			copy(m.receiveKey[i][:], receiveKey)
 			return true
@@ -62,6 +67,7 @@ func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, rece
 			m.expireTime[i] = expireTime
 			m.lastAccessTime[i] = time
 			m.connectTokenEntryIndex[i] = connectTokenEntryIndex
+			m.setConnectTokenMac(i, tokenMac)
 			copy(m.sendKey[i][:], sendKey)
 			copy(m.receiveKey[i][:], receiveKey)
 			if i+1 > m.numEncryptionMappings {
@@ -74,12 +80,21 @@ func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, rece
 	return false
 }
 
+func (m *encryptionManager) setConnectTokenMac(index int, tokenMac [][]byte) {
+	if len(tokenMac) > 0 && len(tokenMac[0]) == MacBytes {
+		copy(m.connectTokenMac[index][:], tokenMac[0])
+	} else {
+		m.connectTokenMac[index] = [MacBytes]byte{}
+	}
+}
+
 func (m *encryptionManager) removeEncryptionMapping(address *Address, time float64) bool {
 	for i := 0; i < m.numEncryptionMappings; i++ {
 		if m.address[i].Equal(*address) {
 			m.expireTime[i] = -1.0
 			m.lastAccessTime[i] = -1000.0
 			m.connectTokenEntryIndex[i] = -1
+			m.connectTokenMac[i] = [MacBytes]byte{}
 			m.address[i] = Address{}
 			m.sendKey[i] = [KeyBytes]byte{}
 			m.receiveKey[i] = [KeyBytes]byte{}
@@ -91,6 +106,8 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 						break
 					}
 					m.address[index].Type = AddressNone
+					m.sendKey[index] = [KeyBytes]byte{}
+					m.receiveKey[index] = [KeyBytes]byte{}
 					index--
 				}
 				m.numEncryptionMappings = index + 1
@@ -103,7 +120,18 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 	return false
 }
 
+// clearExpiredKeys zeros the keys of every expired mapping that no client owns.
+func (m *encryptionManager) clearExpiredKeys(time float64) {
+	for i := 0; i < m.numEncryptionMappings; i++ {
+		if m.clientIndex[i] == -1 && m.entryExpired(i, time) {
+			m.sendKey[i] = [KeyBytes]byte{}
+			m.receiveKey[i] = [KeyBytes]byte{}
+		}
+	}
+}
+
 func (m *encryptionManager) findEncryptionMapping(address *Address, time float64) int {
+	m.clearExpiredKeys(time)
 	for i := 0; i < m.numEncryptionMappings; i++ {
 		if m.address[i].Equal(*address) && !m.entryExpired(i, time) {
 			m.lastAccessTime[i] = time
@@ -151,4 +179,11 @@ func (m *encryptionManager) getConnectTokenEntryIndex(index int) int {
 		return -1
 	}
 	return m.connectTokenEntryIndex[index]
+}
+
+func (m *encryptionManager) getConnectTokenMac(index int) []byte {
+	if index == -1 {
+		return nil
+	}
+	return m.connectTokenMac[index][:]
 }

@@ -23,6 +23,10 @@ const (
 	// The reader goroutine waits this long after a failed read, so a socket
 	// that keeps failing cannot spin a core. Chosen, not measured.
 	socketReadErrorBackoff = time.Millisecond
+
+	// minimumSocketBufferSize is the smallest buffer size tried. 64 KiB.
+	// A request below this is not made; the socket keeps the OS default.
+	minimumSocketBufferSize = 65536
 )
 
 var packetTaggingEnabled bool
@@ -64,6 +68,32 @@ type socketError struct {
 func (e *socketError) Error() string { return e.err.Error() }
 func (e *socketError) Unwrap() error { return e.err }
 
+// setSocketBufferSize tries requested, then halves it while the OS refuses,
+// and stops once the next size would be below minimumSocketBufferSize.
+// It returns the accepted size, or 0 if the OS default should be kept.
+func setSocketBufferSize(requested int, set func(int) error) (int, bool) {
+	for size := requested; size >= minimumSocketBufferSize; size /= 2 {
+		if set(size) == nil {
+			return size, true
+		}
+	}
+	return 0, false
+}
+
+// increaseSocketBufferSize applies the requested buffer size with back-off.
+// If every size down to minimumSocketBufferSize is refused, the OS default is
+// kept and socket creation still succeeds. A larger buffer is an optimization,
+// never a requirement. linux and windows clamp a request above the OS limit;
+// the BSDs reject it.
+func increaseSocketBufferSize(requested int, set func(int) error, name string) {
+	size, ok := setSocketBufferSize(requested, set)
+	if !ok {
+		printf(LogLevelInfo, "socket %s buffer size kept at the OS default (%d was not accepted)\n", name, requested)
+	} else if size != requested {
+		printf(LogLevelInfo, "socket %s buffer size reduced from %d to %d\n", name, requested, size)
+	}
+}
+
 func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (*socket, error) {
 	network := "udp4"
 	if address.Type == AddressIPv6 {
@@ -78,37 +108,11 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 	}
 
 	// increase socket send and receive buffer sizes. linux and windows clamp requests
-	// that exceed the OS limit, but the BSDs reject them instead, so back off until accepted.
+	// that exceed the OS limit, but the BSDs reject them instead, so back off until
+	// accepted. If every size is refused, keep the OS default.
 
-	{
-		size := sendBufferSize
-		for conn.SetWriteBuffer(size) != nil {
-			size /= 2
-			if size < 256*1024 {
-				printf(LogLevelError, "error: failed to set socket send buffer size\n")
-				_ = conn.Close()
-				return nil, &socketError{err: errors.New("netcode: failed to set socket send buffer size")}
-			}
-		}
-		if size != sendBufferSize {
-			printf(LogLevelInfo, "socket send buffer size reduced from %d to %d\n", sendBufferSize, size)
-		}
-	}
-
-	{
-		size := receiveBufferSize
-		for conn.SetReadBuffer(size) != nil {
-			size /= 2
-			if size < 256*1024 {
-				printf(LogLevelError, "error: failed to set socket receive buffer size\n")
-				_ = conn.Close()
-				return nil, &socketError{err: errors.New("netcode: failed to set socket receive buffer size")}
-			}
-		}
-		if size != receiveBufferSize {
-			printf(LogLevelInfo, "socket receive buffer size reduced from %d to %d\n", receiveBufferSize, size)
-		}
-	}
+	increaseSocketBufferSize(sendBufferSize, conn.SetWriteBuffer, "send")
+	increaseSocketBufferSize(receiveBufferSize, conn.SetReadBuffer, "receive")
 
 	// tag packets as low latency
 
@@ -204,6 +208,17 @@ func (s *socket) destroy() {
 func (h *socketHolder) destroy() {
 	h.ipv4.destroy()
 	h.ipv6.destroy()
+}
+
+func (h *socketHolder) hasSocketForAddress(address *Address) bool {
+	switch address.Type {
+	case AddressIPv4:
+		return h.ipv4 != nil
+	case AddressIPv6:
+		return h.ipv6 != nil
+	default:
+		return false
+	}
 }
 
 // sendPacketToAddress is shared by the client and server send paths: dispatch a

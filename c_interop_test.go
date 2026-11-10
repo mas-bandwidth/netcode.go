@@ -94,8 +94,10 @@ func TestCInteropClientConnectsToCServer(t *testing.T) {
 	check(t, err == nil)
 	defer client.Close()
 
+	// one second beyond the C server's maximum lifetime, so a token issued in the
+	// second the server started expires after its start floor
 	connectToken, err := GenerateConnectToken([]string{serverAddress}, []string{serverAddress},
-		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+		testConnectTokenExpiry+1, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
 	check(t, err == nil)
 
 	client.Connect(connectToken)
@@ -149,8 +151,9 @@ func TestCInteropCClientConnectsToGoServer(t *testing.T) {
 	serverAddress := "127.0.0.1:40200"
 
 	serverConfig := &ServerConfig{
-		ProtocolID: testProtocolID,
-		PrivateKey: testPrivateKey,
+		ProtocolID:              testProtocolID,
+		PrivateKey:              testPrivateKey,
+		MaxConnectTokenLifetime: DefaultMaxConnectTokenLifetime - 1,
 	}
 
 	server, err := NewServer(serverAddress, serverConfig, 0.0)

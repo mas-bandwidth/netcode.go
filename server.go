@@ -41,7 +41,7 @@ type ServerConfig struct {
 
 	// MaxConnectTokenLifetime is the longest lifetime in seconds that the backend
 	// issues connect tokens with. The server ignores any connection request whose
-	// connect token expire timestamp is earlier than the server start time plus
+	// connect token expire timestamp is at or before the server start time plus
 	// this lifetime, preventing replays of connect tokens issued before the server
 	// started. If <= 0, DefaultMaxConnectTokenLifetime (30) is used.
 	MaxConnectTokenLifetime int
@@ -65,7 +65,8 @@ type ServerConfig struct {
 
 	// OverrideSendAndReceive replaces socket send and receive with the
 	// SendPacketOverride and ReceivePacketOverride callbacks. No sockets are
-	// created.
+	// created. ReceivePacketOverride's returned packetData slice is modified in
+	// place during packet decryption.
 	OverrideSendAndReceive bool
 	SendPacketOverride     func(to *Address, packetData []byte)
 	ReceivePacketOverride  func() (packetData []byte, from Address, ok bool)
@@ -82,6 +83,7 @@ const serverMaxReceivePackets = 64 * MaxClients
 // per second).
 type Server struct {
 	config                         ServerConfig
+	sourceConfig                   *ServerConfig
 	socketHolder                   socketHolder
 	address                        Address
 	address2                       Address
@@ -144,6 +146,7 @@ func serverCreateSocket(address *Address, config *ServerConfig) (*socket, error)
 // in seconds, from any base you like; pass the same time base to Update.
 func NewServerDual(serverAddress1String string, serverAddress2String string, config *ServerConfig, time float64) (*Server, error) {
 	// tolerate a nil config: it's an inconvenience, not a crash
+	sourceConfig := config
 	var configCopy ServerConfig
 	if config != nil {
 		configCopy = *config
@@ -211,6 +214,7 @@ func NewServerDual(serverAddress1String string, serverAddress2String string, con
 
 	server := &Server{
 		config:         *config,
+		sourceConfig:   sourceConfig,
 		address:        serverAddress1,
 		address2:       serverAddress2,
 		time:           time,
@@ -245,6 +249,7 @@ func NewServer(serverAddressString string, config *ServerConfig, time float64) (
 // its sockets.
 func (server *Server) Close() {
 	server.Stop()
+	clear(server.config.PrivateKey[:])
 	server.socketHolder.destroy()
 }
 
@@ -261,6 +266,12 @@ func (server *Server) Start(maxClients int) {
 
 	if server.running {
 		server.Stop()
+	}
+
+	// Stop zeroes the server's private key. Re-supply it from the configuration
+	// the server was created with so a stopped server can be started again.
+	if server.sourceConfig != nil {
+		server.config.PrivateKey = server.sourceConfig.PrivateKey
 	}
 
 	printf(LogLevelInfo, "server started with %d client slots\n", maxClients)
@@ -444,10 +455,12 @@ func (server *Server) DisconnectAllClients() {
 	}
 }
 
-// Stop stops the server, disconnecting all clients. The server can be started
-// again with Start.
+// Stop stops the server, disconnecting all clients, and zeroes the server's
+// copy of the private key. Start restores it from the configuration the server
+// was created with, so the server can be started again; Close also zeroes it.
 func (server *Server) Stop() {
 	if !server.running {
+		clear(server.config.PrivateKey[:])
 		return
 	}
 
@@ -470,6 +483,7 @@ func (server *Server) Stop() {
 	server.globalSequence = 1 << 63
 	server.challengeSequence = 0
 	server.challengeKey = [KeyBytes]byte{}
+	clear(server.config.PrivateKey[:])
 
 	connectTokenEntriesReset(&server.connectTokenEntries)
 
@@ -496,8 +510,15 @@ func (server *Server) findClientIndexByAddress(address *Address) int {
 	return -1
 }
 
-func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest) {
+func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest, currentTimestamp uint64) {
+	defer clear(packet.connectTokenData[:])
+
 	var connectTokenPrivate connectTokenPrivate
+	defer func() {
+		clear(connectTokenPrivate.clientToServerKey[:])
+		clear(connectTokenPrivate.serverToClientKey[:])
+		clear(connectTokenPrivate.userData[:])
+	}()
 	if connectTokenPrivate.read(packet.connectTokenData[:]) != nil {
 		printf(LogLevelDebug, "server ignored connection request. failed to read connect token\n")
 		return
@@ -527,8 +548,6 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
-	currentTimestamp := nowUnix()
-
 	connectTokenEntryIndex := connectTokenEntriesFindOrAdd(&server.connectTokenEntries,
 		from,
 		packet.connectTokenData[connectTokenPrivateBytes-MacBytes:],
@@ -552,7 +571,12 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
-	expireTime := -1.0
+	tokenLifetime := packet.connectTokenExpireTimestamp - currentTimestamp
+	if packet.connectTokenExpireTimestamp == 0xFFFFFFFFFFFFFFFF {
+		tokenLifetime = uint64(server.config.MaxConnectTokenLifetime)
+	}
+
+	expireTime := server.time + float64(tokenLifetime)
 	if connectTokenPrivate.timeoutSeconds >= 0 {
 		expireTime = server.time + float64(connectTokenPrivate.timeoutSeconds)
 	}
@@ -563,7 +587,8 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		server.time,
 		expireTime,
 		connectTokenPrivate.timeoutSeconds,
-		connectTokenEntryIndex) {
+		connectTokenEntryIndex,
+		packet.connectTokenData[connectTokenPrivateBytes-MacBytes:]) {
 		printf(LogLevelDebug, "server ignored connection request. failed to add encryption mapping\n")
 		return
 	}
@@ -621,7 +646,8 @@ func (server *Server) connectClient(clientIndex int, address *Address, clientID 
 
 	connectTokenEntryIndex := server.encryptionManager.getConnectTokenEntryIndex(encryptionIndex)
 	if connectTokenEntryIndex >= 0 {
-		connectTokenEntriesConsume(&server.connectTokenEntries, connectTokenEntryIndex)
+		connectTokenEntriesConsume(&server.connectTokenEntries, connectTokenEntryIndex,
+			server.encryptionManager.getConnectTokenMac(encryptionIndex))
 	}
 
 	if logLevel >= LogLevelInfo {
@@ -681,14 +707,16 @@ func (server *Server) processConnectionResponsePacket(from *Address, packet *con
 	server.connectClient(clientIndex, from, challengeToken.clientID, encryptionIndex, timeoutSeconds, challengeToken.userData[:])
 }
 
-func (server *Server) processPacketInternal(from *Address, p packet, sequence uint64, encryptionIndex int, clientIndex int) {
+func (server *Server) processPacketInternal(from *Address, p packet, sequence uint64, encryptionIndex int, clientIndex int, currentTimestamp uint64) {
 	switch t := p.(type) {
 	case *connectionRequest:
 		if server.flags&serverFlagIgnoreConnectionRequestPackets == 0 {
 			if logLevel >= LogLevelDebug {
 				printf(LogLevelDebug, "server received connection request from %s\n", from.String())
 			}
-			server.processConnectionRequestPacket(from, t)
+			server.processConnectionRequestPacket(from, t, currentTimestamp)
+		} else {
+			clear(t.connectTokenData[:])
 		}
 
 	case *connectionResponse:
@@ -731,7 +759,7 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 // ProcessPacket processes a raw packet received from the given address, as if
 // it had arrived on one of the server's sockets. This is useful together with
 // ServerConfig.OverrideSendAndReceive to drive the server with your own
-// transport.
+// transport. packetData is modified in place during decryption.
 func (server *Server) ProcessPacket(from *Address, packetData []byte) {
 	allowedPackets := serverAllowedPackets()
 
@@ -797,7 +825,7 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 		return
 	}
 
-	server.processPacketInternal(from, packet, sequence, encryptionIndex, clientIndex)
+	server.processPacketInternal(from, packet, sequence, encryptionIndex, clientIndex, currentTimestamp)
 }
 
 func (server *Server) receivePackets() {
@@ -1055,11 +1083,13 @@ func (server *Server) MaxClients() int {
 // Update advances the server to the given time: it receives and processes
 // packets, sends keep-alive packets, and times out clients. Call it regularly,
 // for example 60 times per second.
+// time must be monotonically non-decreasing across calls.
 func (server *Server) Update(time float64) {
 	server.time = time
 	server.receivePackets()
 	server.sendPackets()
 	server.checkForTimeouts()
+	server.encryptionManager.clearExpiredKeys(server.time)
 }
 
 // ConnectLoopbackClient connects a client to the given slot in loopback mode.

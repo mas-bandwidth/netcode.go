@@ -277,10 +277,20 @@ func (token *connectToken) read(buffer []byte) error {
 // GenerateConnectToken generates a connect token for a client, exactly as the
 // web backend would. Each entry of publicServerAddresses is the address the
 // client connects to, with the corresponding entry of internalServerAddresses
-// being the address the server sees itself as (often the same). Pass a
-// negative expireSeconds or timeoutSeconds to disable expiry or timeout
-// respectively (dev only). userData is up to 256 bytes of user defined data,
-// and may be nil.
+// being the address the server sees itself as (often the same). userData is up
+// to 256 bytes of user defined data, and may be nil.
+//
+// A negative expireSeconds disables expiry and is for development and testing
+// only. The resulting expire timestamp is ^uint64(0), which has two
+// consequences. First, it is always later than the minimum connect token expire
+// timestamp a server records on Start, so the token remains valid across server
+// restarts for as long as the server uses the same private key and protocol ID.
+// Second, its entry in the server's connect token history is only reusable once
+// its expire timestamp is less than or equal to the current time, which never
+// happens for ^uint64(0), so that entry is never reused during the server run.
+//
+// A negative timeoutSeconds disables timeout and is likewise for development
+// and testing only.
 //
 // The returned connect token is ConnectTokenBytes (2048 bytes) long.
 func GenerateConnectToken(publicServerAddresses []string,

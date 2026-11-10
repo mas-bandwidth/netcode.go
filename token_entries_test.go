@@ -37,7 +37,7 @@ func TestConnectTokenEntries(t *testing.T) {
 	check(t, connectTokenEntriesFindOrAdd(&entries, &addressB, mac[:], expireTimestamp, currentTimestamp, 200.0) == connectTokenEntryRefused)
 
 	// a consumed entry admits nothing, including the address that used the connect token
-	connectTokenEntriesConsume(&entries, index)
+	connectTokenEntriesConsume(&entries, index, mac[:])
 
 	check(t, entries[index].state == connectTokenEntryConsumed)
 	check(t, connectTokenEntriesFindOrAdd(&entries, &addressA, mac[:], expireTimestamp, currentTimestamp, 300.0) == connectTokenEntryRefused)
@@ -66,12 +66,44 @@ func TestConnectTokenEntries(t *testing.T) {
 	check(t, connectTokenEntriesFindOrAdd(&entries, &addressA, overflowMac[:], expireTimestamp, expireTimestamp, 600.0) >= 0)
 }
 
+func TestConnectTokenEntriesConsumeOnlyMatchingToken(t *testing.T) {
+	var entries [maxConnectTokenEntries]connectTokenEntry
+	connectTokenEntriesReset(&entries)
+
+	address, err := ParseAddress("[::1]:50000")
+	check(t, err == nil)
+
+	var firstMac, secondMac [MacBytes]byte
+	firstMac[0] = 1
+	secondMac[0] = 2
+
+	firstExpireTimestamp := uint64(1000)
+	firstIndex := connectTokenEntriesFindOrAdd(&entries, &address, firstMac[:],
+		firstExpireTimestamp, firstExpireTimestamp-1, 100.0)
+	check(t, firstIndex >= 0)
+
+	// the first token expires and the second takes over its history slot
+	secondExpireTimestamp := firstExpireTimestamp + 100
+	secondIndex := connectTokenEntriesFindOrAdd(&entries, &address, secondMac[:],
+		secondExpireTimestamp, firstExpireTimestamp, 200.0)
+	check(t, secondIndex == firstIndex)
+	check(t, entries[secondIndex].state == connectTokenEntryPending)
+
+	// a late response for the first token must leave the second token pending
+	connectTokenEntriesConsume(&entries, firstIndex, firstMac[:])
+	check(t, entries[secondIndex].state == connectTokenEntryPending)
+
+	// the second token's retried connection request is still admitted
+	check(t, connectTokenEntriesFindOrAdd(&entries, &address, secondMac[:],
+		secondExpireTimestamp, firstExpireTimestamp, 300.0) == secondIndex)
+}
+
 func TestConnectTokenEntriesConsumeBounds(t *testing.T) {
 	var entries [maxConnectTokenEntries]connectTokenEntry
 	connectTokenEntriesReset(&entries)
 
 	// Out of range indices should not panic
-	connectTokenEntriesConsume(&entries, -1)
-	connectTokenEntriesConsume(&entries, maxConnectTokenEntries)
-	connectTokenEntriesConsume(&entries, 99999)
+	connectTokenEntriesConsume(&entries, -1, nil)
+	connectTokenEntriesConsume(&entries, maxConnectTokenEntries, nil)
+	connectTokenEntriesConsume(&entries, 99999, nil)
 }
