@@ -149,8 +149,9 @@ func TestCInteropCClientConnectsToGoServer(t *testing.T) {
 	serverAddress := "127.0.0.1:40200"
 
 	serverConfig := &ServerConfig{
-		ProtocolID: testProtocolID,
-		PrivateKey: testPrivateKey,
+		ProtocolID:              testProtocolID,
+		PrivateKey:              testPrivateKey,
+		MaxConnectTokenLifetime: DefaultMaxConnectTokenLifetime - 1,
 	}
 
 	server, err := NewServer(serverAddress, serverConfig, 0.0)
