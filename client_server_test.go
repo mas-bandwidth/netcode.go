@@ -1544,6 +1544,7 @@ func TestLoopbackStateChangeCallback(t *testing.T) {
 			StateChangeCallback: func(previousState int, currentState int) {
 				stateChanges = append(stateChanges, stateChange{previousState, currentState})
 			},
+			SendLoopbackPacketCallback: func(clientIndex int, packetData []byte, packetSequence uint64) {},
 		},
 		time:                  1000.0,
 		state:                 ClientStateDisconnected,
