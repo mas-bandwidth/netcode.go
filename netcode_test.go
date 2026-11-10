@@ -1148,6 +1148,87 @@ func TestReplayProtection(t *testing.T) {
 	check(t, replay.alreadyReceived(maxUint64-1-replayProtectionBufferSize))
 }
 
+func TestReadPacketRejectsReplay(t *testing.T) {
+	inputPacket := &connectionPayload{payloadData: []byte("replay test payload")}
+
+	var buffer [maxPacketBytes]byte
+	packetKey := GenerateKey()
+
+	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
+
+	check(t, bytesWritten > 0)
+
+	wireBytes := make([]byte, bytesWritten)
+	copy(wireBytes, buffer[:bytesWritten])
+
+	var replay replayProtection
+	replay.reset()
+
+	allowedPackets := allPacketsAllowed()
+
+	// readPacket decrypts in place, so each call gets its own copy of the same wire bytes
+
+	firstBytes := make([]byte, len(wireBytes))
+	copy(firstBytes, wireBytes)
+
+	var firstSequence uint64
+	firstPacket := readPacket(firstBytes, &firstSequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay)
+
+	check(t, firstPacket != nil)
+	check(t, firstSequence == 1000)
+
+	secondBytes := make([]byte, len(wireBytes))
+	copy(secondBytes, wireBytes)
+
+	var secondSequence uint64
+	secondPacket := readPacket(secondBytes, &secondSequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay)
+
+	check(t, secondPacket == nil)
+}
+
+func TestReadPacketIgnoresCorruptedPacket(t *testing.T) {
+	inputPacket := &connectionPayload{payloadData: []byte("corrupted packet payload")}
+
+	var buffer [maxPacketBytes]byte
+	packetKey := GenerateKey()
+
+	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
+
+	check(t, bytesWritten > 0)
+
+	wireBytes := make([]byte, bytesWritten)
+	copy(wireBytes, buffer[:bytesWritten])
+
+	var replay replayProtection
+	replay.reset()
+
+	allowedPackets := allPacketsAllowed()
+
+	// a corrupted packet at sequence 1000 must be ignored without affecting replay protection
+
+	corruptedBytes := make([]byte, len(wireBytes))
+	copy(corruptedBytes, wireBytes)
+	corruptedBytes[len(corruptedBytes)-1] ^= 0xFF
+
+	var corruptedSequence uint64
+	corruptedPacket := readPacket(corruptedBytes, &corruptedSequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay)
+
+	check(t, corruptedPacket == nil)
+	check(t, corruptedSequence == 1000)
+
+	// the authentic packet at the same sequence must still be accepted
+
+	authenticBytes := make([]byte, len(wireBytes))
+	copy(authenticBytes, wireBytes)
+
+	var sequence uint64
+	outputPacket, ok := readPacket(authenticBytes, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay).(*connectionPayload)
+
+	check(t, ok)
+	check(t, sequence == 1000)
+	check(t, bytes.Equal(outputPacket.payloadData, inputPacket.payloadData))
+}
+
 func TestRuntimeGuards(t *testing.T) {
 	// out of range arguments to public entry points must not crash or corrupt state
 
