@@ -113,6 +113,69 @@ func TestClientConnectTokenPredatesServerStart(t *testing.T) {
 	check(t, server.NumConnectedClients() == 1)
 }
 
+func TestClientConnectTokenReuseAcrossServerRestart(t *testing.T) {
+	const lifetime = DefaultMaxConnectTokenLifetime
+	const startTime = testNowUnix
+
+	clock := startTime
+	previousNowUnix := nowUnix
+	nowUnix = func() uint64 { return clock }
+	defer func() { nowUnix = previousNowUnix }()
+
+	currentTime := 0.0
+	deltaTime := 1.0 / 10.0
+
+	simulator := NewNetworkSimulator()
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+	client, err := NewClient("[::1]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	serverConfig := &ServerConfig{
+		ProtocolID:              testProtocolID,
+		PrivateKey:              testPrivateKey,
+		NetworkSimulator:        simulator,
+		MaxConnectTokenLifetime: lifetime,
+	}
+	server, err := NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	// Issue the token one second after the first start so its first use is
+	// accepted.
+	clock = startTime + 1
+
+	connectTokenData, err := GenerateConnectToken([]string{"[::1]:40000"}, []string{"[::1]:40000"},
+		lifetime, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+	check(t, err == nil)
+
+	var parsed connectToken
+	check(t, parsed.read(connectTokenData) == nil)
+	check(t, parsed.expireTimestamp == clock+uint64(lifetime))
+
+	client.Connect(connectTokenData)
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+	check(t, client.State() == ClientStateConnected)
+	check(t, server.NumConnectedClients() == 1)
+
+	server.Stop()
+	simulator.Reset()
+
+	// Restart in the token's creation second, so its expiry sits exactly at
+	// the new start boundary and the token must be refused.
+	server.Start(1)
+	check(t, server.minConnectTokenExpireTimestamp == parsed.expireTimestamp)
+
+	client.Connect(connectTokenData)
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+
+	check(t, client.State() == ClientStateConnectionRequestTimedOut)
+	check(t, server.NumConnectedClients() == 0)
+}
+
 func TestConnectTokenHistoryFullServerRefusal(t *testing.T) {
 	simulator := NewNetworkSimulator()
 
