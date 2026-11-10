@@ -2047,7 +2047,7 @@ func TestServerProcessPacketZerosPrivateTokenInBuffer(t *testing.T) {
 	}
 }
 
-func TestServerStopZeroesPrivateKey(t *testing.T) {
+func TestServerCloseZeroesPrivateKey(t *testing.T) {
 	serverConfig := &ServerConfig{
 		ProtocolID:       testProtocolID,
 		PrivateKey:       testPrivateKey,
@@ -2055,19 +2055,20 @@ func TestServerStopZeroesPrivateKey(t *testing.T) {
 	}
 	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
 	check(t, err == nil)
-	defer server.Close()
 
 	server.Start(1)
 	server.Stop()
 
-	if server.config.PrivateKey != ([KeyBytes]byte{}) {
-		t.Fatal("Stop did not zero the server's private key")
+	// the server keeps its own key across Stop so it can be started again
+	if server.config.PrivateKey != testPrivateKey {
+		t.Fatal("Stop changed the server's private key")
 	}
 
-	// the key is restored from the configuration when the server starts again
 	server.Start(1)
-	if server.config.PrivateKey != testPrivateKey {
-		t.Fatal("Start did not restore the server's private key")
+	server.Close()
+
+	if server.config.PrivateKey != ([KeyBytes]byte{}) {
+		t.Fatal("Close did not zero the server's private key")
 	}
 }
 
@@ -2111,7 +2112,7 @@ func TestServerIgnoredConnectionRequestClearsTokenData(t *testing.T) {
 	}
 }
 
-func TestServerStopBeforeStartZeroesPrivateKey(t *testing.T) {
+func TestServerCloseBeforeStartZeroesPrivateKey(t *testing.T) {
 	serverConfig := &ServerConfig{
 		ProtocolID:       testProtocolID,
 		PrivateKey:       testPrivateKey,
@@ -2119,12 +2120,11 @@ func TestServerStopBeforeStartZeroesPrivateKey(t *testing.T) {
 	}
 	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
 	check(t, err == nil)
-	defer server.Close()
 
-	server.Stop()
+	server.Close()
 
 	if server.config.PrivateKey != ([KeyBytes]byte{}) {
-		t.Fatal("Stop before Start did not zero the server's private key")
+		t.Fatal("Close before Start did not zero the server's private key")
 	}
 }
 

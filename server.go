@@ -83,7 +83,6 @@ const serverMaxReceivePackets = 64 * MaxClients
 // per second).
 type Server struct {
 	config                         ServerConfig
-	sourceConfig                   *ServerConfig
 	socketHolder                   socketHolder
 	address                        Address
 	address2                       Address
@@ -146,7 +145,6 @@ func serverCreateSocket(address *Address, config *ServerConfig) (*socket, error)
 // in seconds, from any base you like; pass the same time base to Update.
 func NewServerDual(serverAddress1String string, serverAddress2String string, config *ServerConfig, time float64) (*Server, error) {
 	// tolerate a nil config: it's an inconvenience, not a crash
-	sourceConfig := config
 	var configCopy ServerConfig
 	if config != nil {
 		configCopy = *config
@@ -214,7 +212,6 @@ func NewServerDual(serverAddress1String string, serverAddress2String string, con
 
 	server := &Server{
 		config:         *config,
-		sourceConfig:   sourceConfig,
 		address:        serverAddress1,
 		address2:       serverAddress2,
 		time:           time,
@@ -266,12 +263,6 @@ func (server *Server) Start(maxClients int) {
 
 	if server.running {
 		server.Stop()
-	}
-
-	// Stop zeroes the server's private key. Re-supply it from the configuration
-	// the server was created with so a stopped server can be started again.
-	if server.sourceConfig != nil {
-		server.config.PrivateKey = server.sourceConfig.PrivateKey
 	}
 
 	printf(LogLevelInfo, "server started with %d client slots\n", maxClients)
@@ -455,12 +446,11 @@ func (server *Server) DisconnectAllClients() {
 	}
 }
 
-// Stop stops the server, disconnecting all clients, and zeroes the server's
-// copy of the private key. Start restores it from the configuration the server
-// was created with, so the server can be started again; Close also zeroes it.
+// Stop stops the server, disconnecting all clients. The server keeps its own
+// copy of the configuration, so it can be started again; Close zeroes the
+// server's copy of the private key.
 func (server *Server) Stop() {
 	if !server.running {
-		clear(server.config.PrivateKey[:])
 		return
 	}
 
@@ -483,7 +473,6 @@ func (server *Server) Stop() {
 	server.globalSequence = 1 << 63
 	server.challengeSequence = 0
 	server.challengeKey = [KeyBytes]byte{}
-	clear(server.config.PrivateKey[:])
 
 	connectTokenEntriesReset(&server.connectTokenEntries)
 
