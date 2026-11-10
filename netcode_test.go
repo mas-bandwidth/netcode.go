@@ -2164,7 +2164,8 @@ func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
 		check(t, manager.receiveKey[0] == ownedReceiveKey)
 	}
 
-	// looking up an expired, unowned mapping zeros its keys. an owned one keeps them.
+	// an expired mapping is never found. the sweep the server runs each update zeros the
+	// keys of an expired, unowned mapping. an owned one keeps them.
 	{
 		var manager encryptionManager
 		manager.reset()
@@ -2180,14 +2181,16 @@ func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
 		check(t, manager.findEncryptionMapping(&unowned, expiredTime) == -1)
 		check(t, manager.findEncryptionMapping(&owned, expiredTime) == -1)
 
+		manager.clearExpiredKeys(expiredTime)
+
 		if manager.sendKey[0] != zeroKey || manager.receiveKey[0] != zeroKey {
-			t.Fatal("keys of expired encryption mapping were not zeroed on lookup")
+			t.Fatal("keys of expired encryption mapping were not zeroed by the sweep")
 		}
 		check(t, manager.sendKey[1] == ownedSendKey)
 		check(t, manager.receiveKey[1] == ownedReceiveKey)
 	}
 
-	// looking up or adding a different address zeros the keys of every expired, unowned mapping.
+	// adding a different address, or the sweep, zeros the keys of every expired, unowned mapping.
 	// an add reuses the first expired slot, so the check is on the second one.
 	for _, add := range []bool{false, true} {
 		var manager encryptionManager
@@ -2209,8 +2212,9 @@ func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
 			check(t, manager.address[0].Equal(other))
 		} else {
 			check(t, manager.findEncryptionMapping(&other, expiredTime) == -1)
+			manager.clearExpiredKeys(expiredTime)
 			if manager.sendKey[0] != zeroKey || manager.receiveKey[0] != zeroKey {
-				t.Fatal("keys of expired encryption mapping were not zeroed on lookup of another address")
+				t.Fatal("keys of expired encryption mapping were not zeroed by the sweep")
 			}
 		}
 
