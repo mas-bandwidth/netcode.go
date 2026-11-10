@@ -164,3 +164,62 @@ func TestConnectTokenHistoryFullServerRefusal(t *testing.T) {
 	check(t, client.State() == ClientStateConnectionRequestTimedOut)
 	check(t, server.NumConnectedClients() == 0)
 }
+
+func TestProcessConnectionRequestUsesPacketTimestamp(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	server, err := NewServer("[::1]:40000", &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+	}, 0.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+	defer server.Stop()
+
+	from, err := ParseAddress("[::1]:50000")
+	check(t, err == nil)
+
+	// the packet timestamp is one second before the token expires. the history
+	// already holds a different token that expires at the token timestamp.
+	expireTimestamp := server.minConnectTokenExpireTimestamp + 100
+	readTimestamp := expireTimestamp - 1
+
+	previousEntry := connectTokenEntry{
+		state:           connectTokenEntryConsumed,
+		time:            100.0,
+		expireTimestamp: expireTimestamp,
+		address:         from,
+	}
+	previousEntry.mac[0] = 0xAA
+	server.connectTokenEntries[0] = previousEntry
+
+	connectToken := generateConnectTokenPrivate(testClientID, testTimeoutSeconds, []Address{server.address}, nil)
+
+	request := &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  testProtocolID,
+		connectTokenExpireTimestamp: expireTimestamp,
+	}
+	request.connectTokenNonce = generateNonce()
+	connectToken.write(request.connectTokenData[:])
+	check(t, encryptConnectTokenPrivate(request.connectTokenData[:], testProtocolID, expireTimestamp, request.connectTokenNonce[:], testPrivateKey[:]) == nil)
+
+	var packetData [maxPacketBytes]byte
+	packetBytes := writePacket(request, packetData[:], 0, nil, testProtocolID)
+	check(t, packetBytes > 0)
+
+	// the clock has ticked to the token timestamp, but the packet was read at
+	// the earlier timestamp and that same timestamp must be used throughout.
+	previousNowUnix := nowUnix
+	nowUnix = func() uint64 { return expireTimestamp }
+	defer func() { nowUnix = previousNowUnix }()
+
+	allowedPackets := serverAllowedPackets()
+	server.readAndProcessPacket(&from, packetData[:packetBytes], readTimestamp, &allowedPackets)
+
+	check(t, server.connectTokenEntries[0] == previousEntry)
+	check(t, server.connectTokenEntries[1].state == connectTokenEntryPending)
+}

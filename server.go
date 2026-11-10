@@ -496,7 +496,7 @@ func (server *Server) findClientIndexByAddress(address *Address) int {
 	return -1
 }
 
-func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest) {
+func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest, currentTimestamp uint64) {
 	var connectTokenPrivate connectTokenPrivate
 	if connectTokenPrivate.read(packet.connectTokenData[:]) != nil {
 		printf(LogLevelDebug, "server ignored connection request. failed to read connect token\n")
@@ -526,8 +526,6 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		printf(LogLevelDebug, "server ignored connection request. a client with this id is already connected\n")
 		return
 	}
-
-	currentTimestamp := nowUnix()
 
 	connectTokenEntryIndex := connectTokenEntriesFindOrAdd(&server.connectTokenEntries,
 		from,
@@ -686,14 +684,14 @@ func (server *Server) processConnectionResponsePacket(from *Address, packet *con
 	server.connectClient(clientIndex, from, challengeToken.clientID, encryptionIndex, timeoutSeconds, challengeToken.userData[:])
 }
 
-func (server *Server) processPacketInternal(from *Address, p packet, sequence uint64, encryptionIndex int, clientIndex int) {
+func (server *Server) processPacketInternal(from *Address, p packet, sequence uint64, encryptionIndex int, clientIndex int, currentTimestamp uint64) {
 	switch t := p.(type) {
 	case *connectionRequest:
 		if server.flags&serverFlagIgnoreConnectionRequestPackets == 0 {
 			if logLevel >= LogLevelDebug {
 				printf(LogLevelDebug, "server received connection request from %s\n", from.String())
 			}
-			server.processConnectionRequestPacket(from, t)
+			server.processConnectionRequestPacket(from, t, currentTimestamp)
 		}
 
 	case *connectionResponse:
@@ -802,7 +800,7 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 		return
 	}
 
-	server.processPacketInternal(from, packet, sequence, encryptionIndex, clientIndex)
+	server.processPacketInternal(from, packet, sequence, encryptionIndex, clientIndex, currentTimestamp)
 }
 
 func (server *Server) receivePackets() {
