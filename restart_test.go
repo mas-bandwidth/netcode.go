@@ -13,6 +13,8 @@ func TestServerRestartGlobalSequence(t *testing.T) {
 		ProtocolID:             testProtocolID,
 		PrivateKey:             testPrivateKey,
 		OverrideSendAndReceive: true,
+		SendPacketOverride:     func(to *Address, packetData []byte) {},
+		ReceivePacketOverride:  func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false },
 	}
 	server, err := NewServer("[::1]:40123", serverConfig, 0.0)
 	check(t, err == nil)
