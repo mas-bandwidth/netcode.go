@@ -1058,6 +1058,7 @@ func (server *Server) MaxClients() int {
 // Update advances the server to the given time: it receives and processes
 // packets, sends keep-alive packets, and times out clients. Call it regularly,
 // for example 60 times per second.
+// time must be monotonically non-decreasing across calls.
 func (server *Server) Update(time float64) {
 	server.time = time
 	server.receivePackets()
