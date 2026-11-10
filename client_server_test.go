@@ -695,7 +695,11 @@ func TestClientServerAddressFamilySelection(t *testing.T) {
 	const expireTimestamp = createTimestamp + uint64(testConnectTokenExpiry)
 
 	newSingleFamilyClient := func(ipv4, ipv6 bool) *Client {
-		client, err := NewClient("127.0.0.1:50000", &ClientConfig{OverrideSendAndReceive: true}, clientTime)
+		client, err := NewClient("127.0.0.1:50000", &ClientConfig{
+			OverrideSendAndReceive: true,
+			SendPacketOverride:     func(to *Address, packetData []byte) {},
+			ReceivePacketOverride:  func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false },
+		}, clientTime)
 		check(t, err == nil)
 		client.config.OverrideSendAndReceive = false
 		if ipv4 {
