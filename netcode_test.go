@@ -2124,6 +2124,62 @@ func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
 		check(t, manager.sendKey[1] == ownedSendKey)
 		check(t, manager.receiveKey[1] == ownedReceiveKey)
 	}
+
+	// looking up or adding a different address zeros the keys of every expired, unowned mapping.
+	// an add reuses the first expired slot, so the check is on the second one.
+	for _, add := range []bool{false, true} {
+		var manager encryptionManager
+		manager.reset()
+
+		first := address(40000)
+		second := address(40001)
+		owned := address(40002)
+		other := address(40003)
+		check(t, manager.addEncryptionMapping(&first, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		check(t, manager.addEncryptionMapping(&second, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		check(t, manager.addEncryptionMapping(&owned, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		manager.clientIndex[2] = 0
+		ownedSendKey := manager.sendKey[2]
+		ownedReceiveKey := manager.receiveKey[2]
+
+		if add {
+			check(t, manager.addEncryptionMapping(&other, GenerateKey(), GenerateKey(), expiredTime, -1.0, testTimeoutSeconds, -1))
+			check(t, manager.address[0].Equal(other))
+		} else {
+			check(t, manager.findEncryptionMapping(&other, expiredTime) == -1)
+			if manager.sendKey[0] != zeroKey || manager.receiveKey[0] != zeroKey {
+				t.Fatal("keys of expired encryption mapping were not zeroed on lookup of another address")
+			}
+		}
+
+		if manager.sendKey[1] != zeroKey || manager.receiveKey[1] != zeroKey {
+			t.Fatalf("keys of expired encryption mapping were not zeroed (add=%v)", add)
+		}
+		check(t, manager.sendKey[2] == ownedSendKey)
+		check(t, manager.receiveKey[2] == ownedReceiveKey)
+	}
+
+	// the server's update zeros the keys of expired, unowned mappings with no lookups at all.
+	{
+		serverConfig := &ServerConfig{
+			ProtocolID:       testProtocolID,
+			PrivateKey:       testPrivateKey,
+			NetworkSimulator: NewNetworkSimulator(),
+		}
+		server, err := NewServer("127.0.0.1:40000", serverConfig, currentTime)
+		check(t, err == nil)
+		defer server.Close()
+		server.Start(1)
+
+		expired := address(50000)
+		check(t, server.encryptionManager.addEncryptionMapping(&expired, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+
+		server.Update(expiredTime)
+
+		if server.encryptionManager.sendKey[0] != zeroKey || server.encryptionManager.receiveKey[0] != zeroKey {
+			t.Fatal("keys of expired encryption mapping were not zeroed by the server update")
+		}
+	}
 }
 
 func TestSocketBufferSizeBackOff(t *testing.T) {

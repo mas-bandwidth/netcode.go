@@ -42,6 +42,8 @@ func (m *encryptionManager) entryExpired(index int, time float64) bool {
 }
 
 func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, receiveKey []byte, time, expireTime float64, timeout int32, connectTokenEntryIndex int) bool {
+	m.clearExpiredKeys(time)
+
 	for i := 0; i < m.numEncryptionMappings; i++ {
 		if m.address[i].Equal(*address) && !m.entryExpired(i, time) {
 			m.timeout[i] = timeout
@@ -105,18 +107,22 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 	return false
 }
 
-func (m *encryptionManager) findEncryptionMapping(address *Address, time float64) int {
+// clearExpiredKeys zeros the keys of every expired mapping that no client owns.
+func (m *encryptionManager) clearExpiredKeys(time float64) {
 	for i := 0; i < m.numEncryptionMappings; i++ {
-		if !m.address[i].Equal(*address) {
-			continue
-		}
-		if !m.entryExpired(i, time) {
-			m.lastAccessTime[i] = time
-			return i
-		}
-		if m.clientIndex[i] == -1 {
+		if m.clientIndex[i] == -1 && m.entryExpired(i, time) {
 			m.sendKey[i] = [KeyBytes]byte{}
 			m.receiveKey[i] = [KeyBytes]byte{}
+		}
+	}
+}
+
+func (m *encryptionManager) findEncryptionMapping(address *Address, time float64) int {
+	m.clearExpiredKeys(time)
+	for i := 0; i < m.numEncryptionMappings; i++ {
+		if m.address[i].Equal(*address) && !m.entryExpired(i, time) {
+			m.lastAccessTime[i] = time
+			return i
 		}
 	}
 	return -1

@@ -1087,6 +1087,7 @@ func (server *Server) Update(time float64) {
 	server.receivePackets()
 	server.sendPackets()
 	server.checkForTimeouts()
+	server.encryptionManager.clearExpiredKeys(server.time)
 }
 
 // ConnectLoopbackClient connects a client to the given slot in loopback mode.
