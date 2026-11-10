@@ -1881,3 +1881,35 @@ func TestPacketTagging(t *testing.T) {
 		server.Close()
 	}
 }
+
+func TestKeepAliveRejectsOutOfRangeIndexAndMaxClients(t *testing.T) {
+	serverAddress := Address{Type: AddressIPv4, IPv4: [4]byte{127, 0, 0, 1}, Port: 40000}
+	cases := []struct {
+		name        string
+		clientIndex int32
+		maxClients  int32
+	}{
+		{name: "client index", clientIndex: -1, maxClients: 8},
+		{name: "max clients", clientIndex: 0, maxClients: 2147483647},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &Client{
+				state:         ClientStateSendingConnectionResponse,
+				serverAddress: serverAddress,
+				clientIndex:   3,
+				maxClients:    8,
+			}
+			client.processPacketInternal(&serverAddress, &connectionKeepAlive{
+				clientIndex: tc.clientIndex,
+				maxClients:  tc.maxClients,
+			}, 1)
+			if client.Index() != 3 || client.MaxClients() != 8 {
+				t.Fatalf("out-of-range keep-alive stored index=%d maxClients=%d", client.Index(), client.MaxClients())
+			}
+			if client.State() != ClientStateSendingConnectionResponse {
+				t.Fatalf("out-of-range keep-alive was accepted, state=%d", client.State())
+			}
+		})
+	}
+}
