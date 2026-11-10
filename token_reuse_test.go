@@ -24,7 +24,7 @@ func TestClientReconnectWithUsedConnectToken(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -83,7 +83,7 @@ func TestClientConnectTokenPredatesServerStart(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// a connect token with a shorter lifetime than the server's configured maximum expires
 	// earlier than any connect token the backend could have issued after the server started,
@@ -103,7 +103,7 @@ func TestClientConnectTokenPredatesServerStart(t *testing.T) {
 	check(t, server.NumConnectedClients() == 0)
 
 	// a connect token with the full lifetime connects
-	validToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry+5, testTimeoutSeconds, randomUint64())
+	validToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
 	client.Connect(validToken)
 
@@ -191,7 +191,7 @@ func TestConnectTokenHistoryFullServerRefusal(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// Fill all connect token history entries with unexpired tokens
 	dummyAddress, err := ParseAddress("[::1]:50000")
@@ -214,7 +214,7 @@ func TestConnectTokenHistoryFullServerRefusal(t *testing.T) {
 	check(t, err == nil)
 	defer client.Close()
 
-	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry+10, testTimeoutSeconds, randomUint64())
+	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 	client.Connect(connectToken)
 
 	for client.State() > ClientStateDisconnected && client.State() != ClientStateConnected {

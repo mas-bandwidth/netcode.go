@@ -93,15 +93,21 @@ func TestServerCreateDualRequiresOverrideCallbacks(t *testing.T) {
 
 func generateTestConnectToken(t *testing.T, serverAddress string, expireSeconds int, timeoutSeconds int, clientID uint64) []byte {
 	t.Helper()
-	// Test tokens are issued one second beyond the requested lifetime so a
-	// token created in the same second a test server starts remains usable.
-	if expireSeconds > 0 {
-		expireSeconds++
-	}
 	connectToken, err := GenerateConnectToken([]string{serverAddress}, []string{serverAddress},
 		expireSeconds, timeoutSeconds, clientID, testProtocolID, testPrivateKey[:], randomUserData())
 	check(t, err == nil)
 	return connectToken
+}
+
+// startServerOneSecondEarlier starts the server as if one second ago, so a connect
+// token issued now with the full maximum lifetime expires after the server's start
+// floor. A token issued in the same second the server starts is refused.
+func startServerOneSecondEarlier(server *Server, maxClients int) {
+	previousNowUnix := nowUnix
+	startTimestamp := previousNowUnix() - 1
+	nowUnix = func() uint64 { return startTimestamp }
+	server.Start(maxClients)
+	nowUnix = previousNowUnix
 }
 
 // pumpUntilConnected runs the standard connect loop: update the simulator,
@@ -148,7 +154,7 @@ func TestClientServerConnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -235,7 +241,7 @@ func clientServerSocketConnectTo(t *testing.T, clientAddress, clientAddress2, se
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, connectAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -329,7 +335,7 @@ func TestClientServerKeepAlive(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -387,7 +393,7 @@ func TestClientServerMultipleClients(t *testing.T) {
 	for i := 0; i < len(maxClients); i++ {
 		// start the server with max # of clients for this iteration
 
-		server.Start(maxClients[i])
+		startServerOneSecondEarlier(server, maxClients[i])
 
 		// create # of client objects for this iteration and connect to server
 
@@ -555,7 +561,7 @@ func TestClientServerMultipleServers(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// the first two server addresses are unreachable. the client works through them
 	// and connects to the third.
@@ -819,7 +825,7 @@ func TestClientErrorConnectionTimedOut(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -873,7 +879,7 @@ func TestClientErrorConnectionResponseTimeout(t *testing.T) {
 
 	server.flags = serverFlagIgnoreConnectionResponsePackets
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -908,7 +914,7 @@ func TestClientErrorConnectionRequestTimeout(t *testing.T) {
 
 	server.flags = serverFlagIgnoreConnectionRequestPackets
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -943,7 +949,7 @@ func TestClientErrorConnectionDenied(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1016,7 +1022,7 @@ func TestClientSideDisconnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1076,7 +1082,7 @@ func TestServerSideDisconnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1144,12 +1150,12 @@ func TestServerSideDisconnectWithMoreServerAddresses(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	serverAddresses := []string{"[::1]:40000", "[::1]:40001"}
 
 	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
-		testConnectTokenExpiry+1, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
 	check(t, err == nil)
 
 	client.Connect(connectToken)
@@ -1212,7 +1218,7 @@ func TestDisconnectCallbackCanStopServer(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1266,7 +1272,7 @@ func TestDisconnectCallbackCanDisconnectClient(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1325,7 +1331,7 @@ func TestDisconnectCallbackCanDisconnectAllClients(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(len(clients))
+	startServerOneSecondEarlier(server, len(clients))
 
 	for i := range clients {
 		connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
@@ -1403,7 +1409,7 @@ func TestDisconnectCallbackCanStopServerWithMultipleClients(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(len(clients))
+	startServerOneSecondEarlier(server, len(clients))
 
 	for i := range clients {
 		connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
@@ -1472,7 +1478,7 @@ func TestServerClientDisconnectReason(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// no disconnect has happened yet, so the client slot reason is none
 
@@ -1555,7 +1561,7 @@ func TestClientReconnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	clientID := randomUint64()
 
@@ -1632,7 +1638,7 @@ func TestDisableTimeout(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// negative timeout disables the timeout entirely (dev only)
 
@@ -1780,7 +1786,7 @@ func TestLoopback(t *testing.T) {
 
 	maxClients := 2
 
-	server.Start(maxClients)
+	startServerOneSecondEarlier(server, maxClients)
 
 	context.server = server
 
@@ -2001,7 +2007,7 @@ func TestClientServerSocketReceiveBurst(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, serverAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 	client.Connect(connectToken)
@@ -2264,7 +2270,7 @@ func TestConnectionRequestMappingExpiresWithConnectToken(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectTokenData := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, -1, randomUint64())
 

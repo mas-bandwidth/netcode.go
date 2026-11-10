@@ -57,7 +57,7 @@ func connectsWithKey(t *testing.T, simulator *NetworkSimulator, server *Server, 
 	defer client.Close()
 
 	connectToken, err := GenerateConnectToken([]string{"127.0.0.1:40000"}, []string{"127.0.0.1:40000"},
-		testConnectTokenExpiry+1, testTimeoutSeconds, randomUint64(), testProtocolID, privateKey[:], randomUserData())
+		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, privateKey[:], randomUserData())
 	check(t, err == nil)
 
 	client.Connect(connectToken)
@@ -83,7 +83,7 @@ func TestServerKeepsOwnConfigAfterCallerClearsIt(t *testing.T) {
 	// the caller's struct is the caller's once NewServer returns
 	serverConfig.PrivateKey = [KeyBytes]byte{}
 
-	server.Start(2)
+	startServerOneSecondEarlier(server, 2)
 
 	check(t, connectsWithKey(t, simulator, server, &currentTime, testPrivateKey, "127.0.0.1:50000"))
 	check(t, !connectsWithKey(t, simulator, server, &currentTime, [KeyBytes]byte{}, "127.0.0.1:50001"))
@@ -102,7 +102,7 @@ func TestServerStartRefusesClosedServer(t *testing.T) {
 	check(t, err == nil)
 
 	server.Close()
-	server.Start(2)
+	startServerOneSecondEarlier(server, 2)
 
 	check(t, !server.Running())
 	check(t, !connectsWithKey(t, simulator, server, &currentTime, [KeyBytes]byte{}, "127.0.0.1:50000"))
@@ -125,9 +125,9 @@ func TestServerKeepsOwnConfigAcrossRestart(t *testing.T) {
 	RandomBytes(otherKey[:])
 	serverConfig.PrivateKey = otherKey
 
-	server.Start(2)
+	startServerOneSecondEarlier(server, 2)
 	server.Stop()
-	server.Start(2)
+	startServerOneSecondEarlier(server, 2)
 
 	check(t, connectsWithKey(t, simulator, server, &currentTime, testPrivateKey, "127.0.0.1:50000"))
 	check(t, !connectsWithKey(t, simulator, server, &currentTime, otherKey, "127.0.0.1:50001"))
