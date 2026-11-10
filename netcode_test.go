@@ -1397,8 +1397,8 @@ func TestConnectLoopbackRequiresSendLoopbackPacketCallback(t *testing.T) {
 func TestVersionConstants(t *testing.T) {
 	check(t, VersionMajor == 1)
 	check(t, VersionMinor == 4)
-	check(t, VersionPatch == 9)
-	check(t, VersionFull == "1.4.9")
+	check(t, VersionPatch == 10)
+	check(t, VersionFull == "1.4.10")
 }
 
 func TestInitAndDefaults(t *testing.T) {
