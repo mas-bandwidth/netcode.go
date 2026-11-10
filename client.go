@@ -304,6 +304,12 @@ func (client *Client) processPacketInternal(from *Address, p packet, sequence ui
 
 	case *connectionKeepAlive:
 		if from.Equal(client.serverAddress) {
+			maxClients := int(t.maxClients)
+			clientIndex := int(t.clientIndex)
+			if maxClients <= 0 || maxClients > MaxClients || clientIndex < 0 || clientIndex >= maxClients {
+				printf(LogLevelDebug, "ignored connection keep alive packet. client index or max clients out of range\n")
+				break
+			}
 			switch client.state {
 			case ClientStateConnected:
 				printf(LogLevelDebug, "client received connection keep alive packet from server\n")
@@ -311,8 +317,8 @@ func (client *Client) processPacketInternal(from *Address, p packet, sequence ui
 			case ClientStateSendingConnectionResponse:
 				printf(LogLevelDebug, "client received connection keep alive packet from server\n")
 				client.lastPacketReceiveTime = client.time
-				client.clientIndex = int(t.clientIndex)
-				client.maxClients = int(t.maxClients)
+				client.clientIndex = clientIndex
+				client.maxClients = maxClients
 				client.setState(ClientStateConnected)
 				printf(LogLevelInfo, "client connected to server\n")
 			}
