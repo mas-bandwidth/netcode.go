@@ -555,7 +555,8 @@ func (client *Client) Update(time float64) {
 
 	if client.shouldDisconnect {
 		printf(LogLevelDebug, "client should disconnect -> %s\n", ClientStateName(client.shouldDisconnectState))
-		if client.connectToNextServer() {
+		// a connected client that the server disconnects goes to disconnected
+		if client.state != ClientStateConnected && client.connectToNextServer() {
 			return
 		}
 		client.disconnectInternal(client.shouldDisconnectState, false)

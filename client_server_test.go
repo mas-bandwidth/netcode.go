@@ -1113,6 +1113,71 @@ func TestServerSideDisconnect(t *testing.T) {
 	check(t, server.ClientDisconnectReason(0) == DisconnectReasonServerDisconnect)
 }
 
+func TestServerSideDisconnectWithMoreServerAddresses(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 0.0
+	deltaTime := 1.0 / 10.0
+
+	// a connected client that the server disconnects goes to disconnected, and does
+	// not move on to the next server address in its connect token
+
+	var transitions [][2]int
+	clientConfig := &ClientConfig{
+		NetworkSimulator: simulator,
+		StateChangeCallback: func(previousState int, currentState int) {
+			transitions = append(transitions, [2]int{previousState, currentState})
+		},
+	}
+
+	client, err := NewClient("[::]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+	}
+
+	server, err := NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	serverAddresses := []string{"[::1]:40000", "[::1]:40001"}
+
+	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
+		testConnectTokenExpiry+1, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+	check(t, err == nil)
+
+	client.Connect(connectToken)
+
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+
+	check(t, client.State() == ClientStateConnected)
+
+	transitions = nil
+
+	server.DisconnectClient(0)
+
+	for i := 0; i < 10; i++ {
+		simulator.Update(currentTime)
+
+		client.Update(currentTime)
+
+		server.Update(currentTime)
+
+		currentTime += deltaTime
+	}
+
+	check(t, client.State() == ClientStateDisconnected)
+	if len(transitions) != 1 || transitions[0] != [2]int{ClientStateConnected, ClientStateDisconnected} {
+		t.Fatalf("expected one transition from connected to disconnected, got %v", transitions)
+	}
+}
+
 func TestDisconnectCallbackCanStopServer(t *testing.T) {
 	simulator := NewNetworkSimulator()
 
