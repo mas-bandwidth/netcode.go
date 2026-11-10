@@ -249,8 +249,21 @@ func (client *Client) Connect(connectTokenData []byte) {
 		return
 	}
 
-	client.serverAddressIndex = 0
-	client.serverAddress = client.connectToken.serverAddresses[0]
+	serverAddressIndex := -1
+	for i := 0; i < client.connectToken.numServerAddresses; i++ {
+		if client.canReachServerAddress(&client.connectToken.serverAddresses[i]) {
+			serverAddressIndex = i
+			break
+		}
+	}
+	if serverAddressIndex < 0 {
+		client.connectToken = connectToken{}
+		client.setState(ClientStateInvalidConnectToken)
+		return
+	}
+
+	client.serverAddressIndex = serverAddressIndex
+	client.serverAddress = client.connectToken.serverAddresses[serverAddressIndex]
 
 	if client.connectToken.numServerAddresses == 1 {
 		printf(LogLevelInfo, "client connecting to server %s\n", client.serverAddress.String())
@@ -477,13 +490,27 @@ func (client *Client) sendPackets() {
 	}
 }
 
+func (client *Client) canReachServerAddress(address *Address) bool {
+	if client.config.NetworkSimulator != nil || client.config.OverrideSendAndReceive {
+		return true
+	}
+	return client.socketHolder.hasSocketForAddress(address)
+}
+
 func (client *Client) connectToNextServer() bool {
-	if client.serverAddressIndex+1 >= client.connectToken.numServerAddresses {
+	nextIndex := -1
+	for i := client.serverAddressIndex + 1; i < client.connectToken.numServerAddresses; i++ {
+		if client.canReachServerAddress(&client.connectToken.serverAddresses[i]) {
+			nextIndex = i
+			break
+		}
+	}
+	if nextIndex < 0 {
 		printf(LogLevelDebug, "client has no more servers to connect to\n")
 		return false
 	}
 
-	client.serverAddressIndex++
+	client.serverAddressIndex = nextIndex
 	client.serverAddress = client.connectToken.serverAddresses[client.serverAddressIndex]
 
 	client.resetBeforeNextConnect()

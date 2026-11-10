@@ -206,6 +206,17 @@ func (h *socketHolder) destroy() {
 	h.ipv6.destroy()
 }
 
+func (h *socketHolder) hasSocketForAddress(address *Address) bool {
+	switch address.Type {
+	case AddressIPv4:
+		return h.ipv4 != nil
+	case AddressIPv6:
+		return h.ipv6 != nil
+	default:
+		return false
+	}
+}
+
 // sendPacketToAddress is shared by the client and server send paths: dispatch a
 // written packet to the network simulator, the send override, or the socket
 // matching the destination address family.

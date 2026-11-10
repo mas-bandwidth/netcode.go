@@ -689,6 +689,105 @@ func TestClientErrorInvalidConnectToken(t *testing.T) {
 	check(t, client.State() == ClientStateInvalidConnectToken)
 }
 
+func TestClientServerAddressFamilySelection(t *testing.T) {
+	const clientTime = 1000.0
+	const createTimestamp = uint64(clientTime)
+	const expireTimestamp = createTimestamp + uint64(testConnectTokenExpiry)
+
+	newSingleFamilyClient := func(ipv4, ipv6 bool) *Client {
+		client, err := NewClient("127.0.0.1:50000", &ClientConfig{
+			OverrideSendAndReceive: true,
+			SendPacketOverride:     func(to *Address, packetData []byte) {},
+			ReceivePacketOverride:  func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false },
+		}, clientTime)
+		check(t, err == nil)
+		client.config.OverrideSendAndReceive = false
+		if ipv4 {
+			client.socketHolder.ipv4 = &socket{}
+		}
+		if ipv6 {
+			client.socketHolder.ipv6 = &socket{}
+		}
+		return client
+	}
+
+	newConnectToken := func(serverAddresses []string, timeoutSeconds int) []byte {
+		addresses := make([]Address, len(serverAddresses))
+		for i, serverAddress := range serverAddresses {
+			address, err := ParseAddress(serverAddress)
+			check(t, err == nil)
+			addresses[i] = address
+		}
+
+		tokenPrivate := generateConnectTokenPrivate(randomUint64(), int32(timeoutSeconds), addresses, nil)
+		var privateData [connectTokenPrivateBytes]byte
+		tokenPrivate.write(privateData[:])
+
+		var nonce [connectTokenNonceBytes]byte
+		check(t, encryptConnectTokenPrivate(privateData[:], testProtocolID, expireTimestamp, nonce[:], testPrivateKey[:]) == nil)
+
+		token := connectToken{
+			protocolID:         testProtocolID,
+			createTimestamp:    createTimestamp,
+			expireTimestamp:    expireTimestamp,
+			nonce:              nonce,
+			privateData:        privateData,
+			timeoutSeconds:     int32(timeoutSeconds),
+			numServerAddresses: len(addresses),
+			clientToServerKey:  tokenPrivate.clientToServerKey,
+			serverToClientKey:  tokenPrivate.serverToClientKey,
+		}
+		copy(token.serverAddresses[:], addresses)
+
+		buffer := make([]byte, ConnectTokenBytes)
+		token.write(buffer)
+		return buffer
+	}
+
+	{
+		client := newSingleFamilyClient(true, false)
+		token := newConnectToken([]string{"[::1]:40000"}, testTimeoutSeconds)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateInvalidConnectToken)
+	}
+
+	{
+		client := newSingleFamilyClient(false, true)
+		token := newConnectToken([]string{"127.0.0.1:40000"}, testTimeoutSeconds)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateInvalidConnectToken)
+	}
+
+	{
+		client := newSingleFamilyClient(true, false)
+		token := newConnectToken([]string{"[::1]:40000", "127.0.0.1:40001"}, testTimeoutSeconds)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateSendingConnectionRequest)
+		check(t, client.serverAddressIndex == 1)
+		check(t, client.serverAddress.String() == "127.0.0.1:40001")
+	}
+
+	{
+		client := newSingleFamilyClient(true, false)
+		token := newConnectToken([]string{"127.0.0.1:40000", "[::1]:40001", "127.0.0.1:40002", "[::1]:40003"}, 1)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateSendingConnectionRequest)
+		check(t, client.serverAddressIndex == 0)
+		check(t, client.serverAddress.String() == "127.0.0.1:40000")
+
+		check(t, client.connectToNextServer())
+		check(t, client.State() == ClientStateSendingConnectionRequest)
+		check(t, client.serverAddressIndex == 2)
+		check(t, client.serverAddress.String() == "127.0.0.1:40002")
+
+		check(t, !client.connectToNextServer())
+	}
+}
+
 func TestClientErrorConnectionTimedOut(t *testing.T) {
 	simulator := newLossySimulator()
 
