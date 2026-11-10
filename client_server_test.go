@@ -1881,3 +1881,58 @@ func TestPacketTagging(t *testing.T) {
 		server.Close()
 	}
 }
+
+func TestConnectionRequestMappingExpiresWithConnectToken(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 1000.0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+	}
+	server, err := NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	connectTokenData := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, -1, randomUint64())
+
+	var token connectToken
+	check(t, token.read(connectTokenData) == nil)
+
+	from, err := ParseAddress("[::1]:50000")
+	check(t, err == nil)
+
+	packet := &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  testProtocolID,
+		connectTokenExpireTimestamp: token.expireTimestamp,
+		connectTokenNonce:           token.nonce,
+		connectTokenData:            token.privateData,
+	}
+
+	check(t, decryptConnectTokenPrivate(packet.connectTokenData[:],
+		testProtocolID,
+		packet.connectTokenExpireTimestamp,
+		packet.connectTokenNonce[:],
+		testPrivateKey[:]) == nil)
+
+	// the request arrives with two seconds left on its connect token
+
+	previousNowUnix := nowUnix
+	nowUnix = func() uint64 { return token.expireTimestamp - 2 }
+	defer func() { nowUnix = previousNowUnix }()
+
+	server.processConnectionRequestPacket(&from, packet)
+
+	check(t, server.encryptionManager.findEncryptionMapping(&from, currentTime) != -1)
+
+	// the handshake is never completed, so the pending mapping must not outlive the connect token
+
+	afterTokenExpires := currentTime + 3.0
+
+	check(t, server.encryptionManager.findEncryptionMapping(&from, afterTokenExpires) == -1)
+}

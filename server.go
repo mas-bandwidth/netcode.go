@@ -552,7 +552,12 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
-	expireTime := -1.0
+	tokenLifetime := packet.connectTokenExpireTimestamp - currentTimestamp
+	if packet.connectTokenExpireTimestamp == 0xFFFFFFFFFFFFFFFF {
+		tokenLifetime = uint64(server.config.MaxConnectTokenLifetime)
+	}
+
+	expireTime := server.time + float64(tokenLifetime)
 	if connectTokenPrivate.timeoutSeconds >= 0 {
 		expireTime = server.time + float64(connectTokenPrivate.timeoutSeconds)
 	}
