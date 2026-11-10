@@ -258,6 +258,16 @@ func FuzzWriteReadPacketRoundTrip(f *testing.F) {
 			return
 		}
 
+		// 0xFFFFFFFFFFFFFFFF is a reserved sequence, so an encrypted packet
+		// cannot carry it.
+
+		if packetType != connectionRequestPacket && sequence == 0xFFFFFFFFFFFFFFFF {
+			if outputPacket != nil {
+				t.Fatalf("packet with reserved sequence was not rejected")
+			}
+			return
+		}
+
 		if outputPacket == nil {
 			t.Fatalf("uncorrupted packet type %d failed to read back", packetType)
 		}
