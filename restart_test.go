@@ -10,8 +10,11 @@ import "testing"
 // re-seed it, or it reuses nonces.
 func TestServerRestartGlobalSequence(t *testing.T) {
 	serverConfig := &ServerConfig{
-		ProtocolID: testProtocolID,
-		PrivateKey: testPrivateKey,
+		ProtocolID:             testProtocolID,
+		PrivateKey:             testPrivateKey,
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     testSendPacketOverride,
+		ReceivePacketOverride:  testReceivePacketOverride,
 	}
 	server, err := NewServer("[::1]:40123", serverConfig, 0.0)
 	check(t, err == nil)
