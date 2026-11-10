@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"time"
 )
 
 const (
@@ -17,6 +19,10 @@ const (
 	// packets are dropped, just as the OS drops packets when a socket buffer
 	// overflows.
 	socketPacketChannelSize = 16384
+
+	// The reader goroutine waits this long after a failed read, so a socket
+	// that keeps failing cannot spin a core. Chosen, not measured.
+	socketReadErrorBackoff = time.Millisecond
 )
 
 var packetTaggingEnabled bool
@@ -32,6 +38,7 @@ func EnablePacketTagging() {
 type receivedPacket struct {
 	from Address
 	data []byte
+	err  error // a failed read, logged by receivePacket on the caller's goroutine
 }
 
 // socket wraps a UDP socket. The C implementation polls non-blocking sockets;
@@ -125,20 +132,31 @@ func createSocket(address *Address, sendBufferSize int, receiveBufferSize int) (
 		s.address.Port = uint16(localAddr.Port)
 	}
 
-	go s.readLoop()
+	go s.readLoop(conn, time.Sleep)
 
 	return s, nil
 }
 
-func (s *socket) readLoop() {
+// socketReader is the part of *net.UDPConn the reader goroutine uses.
+type socketReader interface {
+	ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error)
+}
+
+// readLoop runs on its own goroutine. It never touches the logging globals:
+// a failed read is queued for receivePacket to log on the caller's goroutine.
+func (s *socket) readLoop(reader socketReader, sleep func(time.Duration)) {
 	buffer := make([]byte, maxPacketBytes)
 	for {
-		bytes, from, err := s.conn.ReadFromUDPAddrPort(buffer)
+		bytes, from, err := reader.ReadFromUDPAddrPort(buffer)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			printf(LogLevelError, "error: socket receive failed with error %v\n", err)
+			select {
+			case s.packets <- receivedPacket{err: err}:
+			default:
+			}
+			sleep(socketReadErrorBackoff)
 			continue
 		}
 		if bytes <= 0 {
@@ -163,11 +181,17 @@ func (s *socket) sendPacket(to *Address, packetData []byte) {
 // receivePacket returns the next buffered packet, or false if none are pending.
 // It never blocks.
 func (s *socket) receivePacket() (receivedPacket, bool) {
-	select {
-	case packet := <-s.packets:
-		return packet, true
-	default:
-		return receivedPacket{}, false
+	for {
+		select {
+		case packet := <-s.packets:
+			if packet.err != nil {
+				printf(LogLevelError, "error: socket receive failed with error %v\n", packet.err)
+				continue
+			}
+			return packet, true
+		default:
+			return receivedPacket{}, false
+		}
 	}
 }
 
