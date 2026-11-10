@@ -1987,7 +1987,10 @@ func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 	}
 
 	allocations := after.Mallocs - before.Mallocs
-	if allocations >= datagrams/2 {
+	// the count is of every allocation in the process. under the race detector on Windows
+	// the instrumented runtime's read path allocates (1058 for 2000 datagrams observed in
+	// CI), so the count says nothing about the library there and is checked without -race.
+	if !raceEnabled && allocations >= datagrams/2 {
 		t.Fatalf("%d datagrams dropped on a full receive channel caused %d allocations", datagrams, allocations)
 	}
 }
@@ -2047,7 +2050,7 @@ func TestServerProcessPacketZerosPrivateTokenInBuffer(t *testing.T) {
 	}
 }
 
-func TestServerStopZeroesPrivateKey(t *testing.T) {
+func TestServerCloseZeroesPrivateKey(t *testing.T) {
 	serverConfig := &ServerConfig{
 		ProtocolID:       testProtocolID,
 		PrivateKey:       testPrivateKey,
@@ -2055,19 +2058,20 @@ func TestServerStopZeroesPrivateKey(t *testing.T) {
 	}
 	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
 	check(t, err == nil)
-	defer server.Close()
 
 	server.Start(1)
 	server.Stop()
 
-	if server.config.PrivateKey != ([KeyBytes]byte{}) {
-		t.Fatal("Stop did not zero the server's private key")
+	// the server keeps its own key across Stop so it can be started again
+	if server.config.PrivateKey != testPrivateKey {
+		t.Fatal("Stop changed the server's private key")
 	}
 
-	// the key is restored from the configuration when the server starts again
 	server.Start(1)
-	if server.config.PrivateKey != testPrivateKey {
-		t.Fatal("Start did not restore the server's private key")
+	server.Close()
+
+	if server.config.PrivateKey != ([KeyBytes]byte{}) {
+		t.Fatal("Close did not zero the server's private key")
 	}
 }
 
@@ -2111,7 +2115,7 @@ func TestServerIgnoredConnectionRequestClearsTokenData(t *testing.T) {
 	}
 }
 
-func TestServerStopBeforeStartZeroesPrivateKey(t *testing.T) {
+func TestServerCloseBeforeStartZeroesPrivateKey(t *testing.T) {
 	serverConfig := &ServerConfig{
 		ProtocolID:       testProtocolID,
 		PrivateKey:       testPrivateKey,
@@ -2119,12 +2123,11 @@ func TestServerStopBeforeStartZeroesPrivateKey(t *testing.T) {
 	}
 	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
 	check(t, err == nil)
-	defer server.Close()
 
-	server.Stop()
+	server.Close()
 
 	if server.config.PrivateKey != ([KeyBytes]byte{}) {
-		t.Fatal("Stop before Start did not zero the server's private key")
+		t.Fatal("Close before Start did not zero the server's private key")
 	}
 }
 
@@ -2164,7 +2167,8 @@ func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
 		check(t, manager.receiveKey[0] == ownedReceiveKey)
 	}
 
-	// looking up an expired, unowned mapping zeros its keys. an owned one keeps them.
+	// an expired mapping is never found. the sweep the server runs each update zeros the
+	// keys of an expired, unowned mapping. an owned one keeps them.
 	{
 		var manager encryptionManager
 		manager.reset()
@@ -2180,14 +2184,16 @@ func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
 		check(t, manager.findEncryptionMapping(&unowned, expiredTime) == -1)
 		check(t, manager.findEncryptionMapping(&owned, expiredTime) == -1)
 
+		manager.clearExpiredKeys(expiredTime)
+
 		if manager.sendKey[0] != zeroKey || manager.receiveKey[0] != zeroKey {
-			t.Fatal("keys of expired encryption mapping were not zeroed on lookup")
+			t.Fatal("keys of expired encryption mapping were not zeroed by the sweep")
 		}
 		check(t, manager.sendKey[1] == ownedSendKey)
 		check(t, manager.receiveKey[1] == ownedReceiveKey)
 	}
 
-	// looking up or adding a different address zeros the keys of every expired, unowned mapping.
+	// adding a different address, or the sweep, zeros the keys of every expired, unowned mapping.
 	// an add reuses the first expired slot, so the check is on the second one.
 	for _, add := range []bool{false, true} {
 		var manager encryptionManager
@@ -2209,8 +2215,9 @@ func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
 			check(t, manager.address[0].Equal(other))
 		} else {
 			check(t, manager.findEncryptionMapping(&other, expiredTime) == -1)
+			manager.clearExpiredKeys(expiredTime)
 			if manager.sendKey[0] != zeroKey || manager.receiveKey[0] != zeroKey {
-				t.Fatal("keys of expired encryption mapping were not zeroed on lookup of another address")
+				t.Fatal("keys of expired encryption mapping were not zeroed by the sweep")
 			}
 		}
 

@@ -131,7 +131,6 @@ func (m *encryptionManager) clearExpiredKeys(time float64) {
 }
 
 func (m *encryptionManager) findEncryptionMapping(address *Address, time float64) int {
-	m.clearExpiredKeys(time)
 	for i := 0; i < m.numEncryptionMappings; i++ {
 		if m.address[i].Equal(*address) && !m.entryExpired(i, time) {
 			m.lastAccessTime[i] = time

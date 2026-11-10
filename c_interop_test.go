@@ -25,6 +25,12 @@ import (
 
 const cInteropTimeout = 30 * time.Second
 
+// cServerStartupDelay is how long the C server is given to start before the test
+// waits for the next second. It is not measured: the C server starts in a few
+// milliseconds here, and a slower start only makes the token's second the same as
+// the server's, which the test reports as a failed connect.
+const cServerStartupDelay = 250 * time.Millisecond
+
 // The C example client and server use this address when passed as argv[1],
 // this private key (the well known netcode test key, testPrivateKey), and
 // protocol id 0x1122334455667788 (testProtocolID).
@@ -68,6 +74,15 @@ func startCBinary(t *testing.T, binary string, args ...string) {
 	})
 }
 
+// waitForNextSecond sleeps until the wall clock reaches the next whole second. A
+// server refuses a connect token issued in the second it started, so a test on
+// the real clock waits for the next second after the server starts before a
+// token is issued.
+func waitForNextSecond() {
+	now := time.Now()
+	time.Sleep(now.Truncate(time.Second).Add(time.Second).Sub(now))
+}
+
 func cInteropPayload() []byte {
 	// the C examples send and assert payload packets of MaxPacketSize bytes
 	// filled with this pattern
@@ -94,10 +109,13 @@ func TestCInteropClientConnectsToCServer(t *testing.T) {
 	check(t, err == nil)
 	defer client.Close()
 
-	// one second beyond the C server's maximum lifetime, so a token issued in the
-	// second the server started expires after its start floor
+	// the C server starts in its own process. give it a moment to start, then issue the
+	// token in a later second than the one it started in
+	time.Sleep(cServerStartupDelay)
+	waitForNextSecond()
+
 	connectToken, err := GenerateConnectToken([]string{serverAddress}, []string{serverAddress},
-		testConnectTokenExpiry+1, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
 	check(t, err == nil)
 
 	client.Connect(connectToken)
@@ -151,9 +169,8 @@ func TestCInteropCClientConnectsToGoServer(t *testing.T) {
 	serverAddress := "127.0.0.1:40200"
 
 	serverConfig := &ServerConfig{
-		ProtocolID:              testProtocolID,
-		PrivateKey:              testPrivateKey,
-		MaxConnectTokenLifetime: DefaultMaxConnectTokenLifetime - 1,
+		ProtocolID: testProtocolID,
+		PrivateKey: testPrivateKey,
 	}
 
 	server, err := NewServer(serverAddress, serverConfig, 0.0)
@@ -161,6 +178,9 @@ func TestCInteropCClientConnectsToGoServer(t *testing.T) {
 	defer server.Close()
 
 	server.Start(MaxClients)
+
+	// the C client issues its token when it starts, so start it in a later second
+	waitForNextSecond()
 
 	startCBinary(t, clientBinary, serverAddress)
 

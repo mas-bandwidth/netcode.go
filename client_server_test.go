@@ -93,15 +93,21 @@ func TestServerCreateDualRequiresOverrideCallbacks(t *testing.T) {
 
 func generateTestConnectToken(t *testing.T, serverAddress string, expireSeconds int, timeoutSeconds int, clientID uint64) []byte {
 	t.Helper()
-	// Test tokens are issued one second beyond the requested lifetime so a
-	// token created in the same second a test server starts remains usable.
-	if expireSeconds > 0 {
-		expireSeconds++
-	}
 	connectToken, err := GenerateConnectToken([]string{serverAddress}, []string{serverAddress},
 		expireSeconds, timeoutSeconds, clientID, testProtocolID, testPrivateKey[:], randomUserData())
 	check(t, err == nil)
 	return connectToken
+}
+
+// startServerOneSecondEarlier starts the server as if one second ago, so a connect
+// token issued now with the full maximum lifetime expires after the server's start
+// floor. A token issued in the same second the server starts is refused.
+func startServerOneSecondEarlier(server *Server, maxClients int) {
+	previousNowUnix := nowUnix
+	startTimestamp := previousNowUnix() - 1
+	nowUnix = func() uint64 { return startTimestamp }
+	server.Start(maxClients)
+	nowUnix = previousNowUnix
 }
 
 // pumpUntilConnected runs the standard connect loop: update the simulator,
@@ -148,7 +154,7 @@ func TestClientServerConnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -235,7 +241,7 @@ func clientServerSocketConnectTo(t *testing.T, clientAddress, clientAddress2, se
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, connectAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -329,7 +335,7 @@ func TestClientServerKeepAlive(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -387,7 +393,7 @@ func TestClientServerMultipleClients(t *testing.T) {
 	for i := 0; i < len(maxClients); i++ {
 		// start the server with max # of clients for this iteration
 
-		server.Start(maxClients[i])
+		startServerOneSecondEarlier(server, maxClients[i])
 
 		// create # of client objects for this iteration and connect to server
 
@@ -555,7 +561,7 @@ func TestClientServerMultipleServers(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// the first two server addresses are unreachable. the client works through them
 	// and connects to the third.
@@ -819,7 +825,7 @@ func TestClientErrorConnectionTimedOut(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -873,7 +879,7 @@ func TestClientErrorConnectionResponseTimeout(t *testing.T) {
 
 	server.flags = serverFlagIgnoreConnectionResponsePackets
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -908,7 +914,7 @@ func TestClientErrorConnectionRequestTimeout(t *testing.T) {
 
 	server.flags = serverFlagIgnoreConnectionRequestPackets
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -943,7 +949,7 @@ func TestClientErrorConnectionDenied(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1016,7 +1022,7 @@ func TestClientSideDisconnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1076,7 +1082,7 @@ func TestServerSideDisconnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1113,6 +1119,71 @@ func TestServerSideDisconnect(t *testing.T) {
 	check(t, server.ClientDisconnectReason(0) == DisconnectReasonServerDisconnect)
 }
 
+func TestServerSideDisconnectWithMoreServerAddresses(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 0.0
+	deltaTime := 1.0 / 10.0
+
+	// a connected client that the server disconnects goes to disconnected, and does
+	// not move on to the next server address in its connect token
+
+	var transitions [][2]int
+	clientConfig := &ClientConfig{
+		NetworkSimulator: simulator,
+		StateChangeCallback: func(previousState int, currentState int) {
+			transitions = append(transitions, [2]int{previousState, currentState})
+		},
+	}
+
+	client, err := NewClient("[::]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+	}
+
+	server, err := NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	startServerOneSecondEarlier(server, 1)
+
+	serverAddresses := []string{"[::1]:40000", "[::1]:40001"}
+
+	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
+		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+	check(t, err == nil)
+
+	client.Connect(connectToken)
+
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+
+	check(t, client.State() == ClientStateConnected)
+
+	transitions = nil
+
+	server.DisconnectClient(0)
+
+	for i := 0; i < 10; i++ {
+		simulator.Update(currentTime)
+
+		client.Update(currentTime)
+
+		server.Update(currentTime)
+
+		currentTime += deltaTime
+	}
+
+	check(t, client.State() == ClientStateDisconnected)
+	if len(transitions) != 1 || transitions[0] != [2]int{ClientStateConnected, ClientStateDisconnected} {
+		t.Fatalf("expected one transition from connected to disconnected, got %v", transitions)
+	}
+}
+
 func TestDisconnectCallbackCanStopServer(t *testing.T) {
 	simulator := NewNetworkSimulator()
 
@@ -1147,7 +1218,7 @@ func TestDisconnectCallbackCanStopServer(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1201,7 +1272,7 @@ func TestDisconnectCallbackCanDisconnectClient(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1260,7 +1331,7 @@ func TestDisconnectCallbackCanDisconnectAllClients(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(len(clients))
+	startServerOneSecondEarlier(server, len(clients))
 
 	for i := range clients {
 		connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
@@ -1338,7 +1409,7 @@ func TestDisconnectCallbackCanStopServerWithMultipleClients(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(len(clients))
+	startServerOneSecondEarlier(server, len(clients))
 
 	for i := range clients {
 		connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
@@ -1407,7 +1478,7 @@ func TestServerClientDisconnectReason(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// no disconnect has happened yet, so the client slot reason is none
 
@@ -1490,7 +1561,7 @@ func TestClientReconnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	clientID := randomUint64()
 
@@ -1567,7 +1638,7 @@ func TestDisableTimeout(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// negative timeout disables the timeout entirely (dev only)
 
@@ -1715,7 +1786,7 @@ func TestLoopback(t *testing.T) {
 
 	maxClients := 2
 
-	server.Start(maxClients)
+	startServerOneSecondEarlier(server, maxClients)
 
 	context.server = server
 
@@ -1936,7 +2007,7 @@ func TestClientServerSocketReceiveBurst(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, serverAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 	client.Connect(connectToken)
@@ -1958,23 +2029,40 @@ func TestClientServerSocketReceiveBurst(t *testing.T) {
 	check(t, err == nil)
 	defer func() { _ = sender.Close() }()
 
-	for i := 0; i < 2000; i++ {
-		_, err = sender.Write([]byte{0})
-		check(t, err == nil)
-	}
+	// real UDP may drop any one datagram, so each attempt sends the burst and then the
+	// payload again, until the server receives the payload or the attempts run out. the
+	// burst is sent on every attempt, so a receive channel too small to hold it drops the
+	// payload on every attempt, not just the first.
 
 	expected := []byte("valid client payload after burst")
-	client.SendPacket(expected)
-	client.Update(currentTime)
+	received := false
 
-	time.Sleep(50 * time.Millisecond)
+	for attempt := 0; attempt < 50 && !received; attempt++ {
+		for i := 0; i < 2000; i++ {
+			_, err = sender.Write([]byte{0})
+			check(t, err == nil)
+		}
 
-	currentTime += deltaTime
-	server.Update(currentTime)
+		client.SendPacket(expected)
+		client.Update(currentTime)
 
-	received, _ := server.ReceivePacket(0)
-	if !bytes.Equal(received, expected) {
-		t.Fatalf("expected client payload %q, got %q", expected, received)
+		time.Sleep(50 * time.Millisecond)
+
+		currentTime += deltaTime
+		server.Update(currentTime)
+
+		for {
+			packet, _ := server.ReceivePacket(0)
+			if packet == nil {
+				break
+			}
+			check(t, bytes.Equal(packet, expected))
+			received = true
+		}
+	}
+
+	if !received {
+		t.Fatalf("the server never received the client payload %q after a burst", expected)
 	}
 }
 
@@ -2099,6 +2187,60 @@ func TestPacketTagging(t *testing.T) {
 	}
 }
 
+func TestClientPacketFromOtherAddressLeavesReplayProtection(t *testing.T) {
+	client, err := NewClient("127.0.0.1:50000", &ClientConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     testSendPacketOverride,
+		ReceivePacketOverride:  testReceivePacketOverride,
+	}, 0.0)
+	check(t, err == nil)
+	defer client.Close()
+
+	packetKey := GenerateKey()
+	copy(client.readPacketKey[:], packetKey)
+	client.hasPacketKeys = true
+	client.connectToken.protocolID = testProtocolID
+
+	// the connected client sends disconnect packets when closed, so give it its own write key
+	copy(client.writePacketKey[:], GenerateKey())
+
+	serverAddress, err := ParseAddress("127.0.0.1:40000")
+	check(t, err == nil)
+	otherAddress, err := ParseAddress("127.0.0.1:40001")
+	check(t, err == nil)
+	client.serverAddress = serverAddress
+
+	client.clientIndex = 0
+	client.maxClients = 1
+
+	client.setState(ClientStateConnected)
+
+	mostRecentSequence := client.replayProtection.mostRecentSequence
+
+	packet := &connectionKeepAlive{clientIndex: 0, maxClients: 1}
+
+	var buffer [maxPacketBytes]byte
+
+	// a packet that authenticates under the client's key, but comes from another address,
+	// must not move the client's replay protection
+	bytesWritten := writePacket(packet, buffer[:], 1000000, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	client.ProcessPacket(&otherAddress, buffer[:bytesWritten])
+
+	check(t, client.replayProtection.mostRecentSequence == mostRecentSequence)
+
+	// and the client still accepts the next packet from its server
+	client.time = 10.0
+
+	bytesWritten = writePacket(packet, buffer[:], 1, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	client.ProcessPacket(&serverAddress, buffer[:bytesWritten])
+
+	check(t, client.lastPacketReceiveTime == 10.0)
+}
+
 func TestKeepAliveRejectsOutOfRangeIndexAndMaxClients(t *testing.T) {
 	serverAddress := Address{Type: AddressIPv4, IPv4: [4]byte{127, 0, 0, 1}, Port: 40000}
 	cases := []struct {
@@ -2145,7 +2287,7 @@ func TestConnectionRequestMappingExpiresWithConnectToken(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectTokenData := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, -1, randomUint64())
 
