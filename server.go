@@ -1,9 +1,6 @@
 package netcode
 
-import (
-	"errors"
-	"time"
-)
+import "errors"
 
 // Server create errors, returned from NewServer and NewServerDual. Bind
 // failures are reported separately from other socket errors because a port
@@ -15,6 +12,10 @@ var (
 	ErrServerCreateSocketIPv6Failed = errors.New("netcode: failed to create server ipv6 socket")
 	ErrServerBindSocketIPv4Failed   = errors.New("netcode: failed to bind server ipv4 socket")
 	ErrServerBindSocketIPv6Failed   = errors.New("netcode: failed to bind server ipv6 socket")
+
+	// ErrServerOverrideCallbacksRequired is returned when OverrideSendAndReceive
+	// is set but SendPacketOverride or ReceivePacketOverride is nil.
+	ErrServerOverrideCallbacksRequired = errors.New("netcode: OverrideSendAndReceive requires both SendPacketOverride and ReceivePacketOverride")
 )
 
 // Server flags.
@@ -50,9 +51,12 @@ type ServerConfig struct {
 	NetworkSimulator *NetworkSimulator
 
 	// ConnectDisconnectCallback, if set, is called when a client connects to
-	// or disconnects from the server. During a disconnect it fires before the
-	// client slot is reset, so the slot can still be queried from inside the
-	// callback.
+	// or disconnects from the server. On disconnect the client is marked as
+	// disconnected before the callback runs, so the callback may safely call
+	// Server methods such as Stop, DisconnectClient and DisconnectAllClients
+	// without re-entering this client's disconnect. ClientID, ClientAddress,
+	// ClientUserData and ClientDisconnectReason remain valid for the duration
+	// of the callback, while ClientConnected reports false.
 	ConnectDisconnectCallback func(clientIndex int, connected bool)
 
 	// SendLoopbackPacketCallback is called to deliver packets sent to a client
@@ -148,6 +152,11 @@ func NewServerDual(serverAddress1String string, serverAddress2String string, con
 		configCopy.MaxConnectTokenLifetime = DefaultMaxConnectTokenLifetime
 	}
 	config = &configCopy
+
+	if config.OverrideSendAndReceive && (config.SendPacketOverride == nil || config.ReceivePacketOverride == nil) {
+		printf(LogLevelError, "error: OverrideSendAndReceive requires SendPacketOverride and ReceivePacketOverride\n")
+		return nil, ErrServerOverrideCallbacksRequired
+	}
 
 	serverAddress1, err := ParseAddress(serverAddress1String)
 	if err != nil {
@@ -267,7 +276,7 @@ func (server *Server) Start(maxClients int) {
 	server.globalSequence = 1 << 63
 	server.challengeSequence = 0
 	RandomBytes(server.challengeKey[:])
-	server.minConnectTokenExpireTimestamp = uint64(time.Now().Unix()) + uint64(server.config.MaxConnectTokenLifetime)
+	server.minConnectTokenExpireTimestamp = nowUnix() + uint64(server.config.MaxConnectTokenLifetime)
 
 	for i := 0; i < server.maxClients; i++ {
 		server.clientPacketQueue[i].clear()
@@ -336,6 +345,8 @@ func (server *Server) sendClientPacket(p packet, clientIndex int) {
 func (server *Server) resetClientSlot(clientIndex int) {
 	server.clientPacketQueue[clientIndex].clear()
 
+	// the caller has already marked the slot disconnected and counted it out
+
 	server.clientConnected[clientIndex] = false
 	server.clientLoopback[clientIndex] = false
 	server.clientConfirmed[clientIndex] = false
@@ -346,20 +357,22 @@ func (server *Server) resetClientSlot(clientIndex int) {
 	server.clientAddress[clientIndex] = Address{}
 	server.clientEncryptionIndex[clientIndex] = -1
 	server.clientUserData[clientIndex] = [UserDataBytes]byte{}
-
-	server.numConnectedClients--
 }
 
 func (server *Server) disconnectClientInternal(clientIndex int, sendDisconnectPackets bool, disconnectReason int) {
+	if clientIndex < 0 || clientIndex >= server.maxClients {
+		return
+	}
+
+	if !server.clientConnected[clientIndex] {
+		return
+	}
+
 	printf(LogLevelInfo, "server disconnected client %d\n", clientIndex)
 
 	// record why before the callback fires, so the reason can be queried from inside the callback
 
 	server.clientDisconnectReason[clientIndex] = disconnectReason
-
-	if server.config.ConnectDisconnectCallback != nil {
-		server.config.ConnectDisconnectCallback(clientIndex, false)
-	}
 
 	if sendDisconnectPackets {
 		printf(LogLevelDebug, "server sent disconnect packets to client %d\n", clientIndex)
@@ -370,11 +383,26 @@ func (server *Server) disconnectClientInternal(clientIndex int, sendDisconnectPa
 		}
 	}
 
+	// mark the slot disconnected and drop its encryption mapping before invoking the callback.
+	// the callback may call back into the server (for example Stop or DisconnectClient) and
+	// must not re-enter the disconnect for this slot.
+
+	encryptionIndex := server.clientEncryptionIndex[clientIndex]
+
+	server.clientConnected[clientIndex] = false
+	server.numConnectedClients--
+
 	server.clientReplayProtection[clientIndex].reset()
 
-	server.encryptionManager.clientIndex[server.clientEncryptionIndex[clientIndex]] = -1
+	if encryptionIndex >= 0 {
+		server.encryptionManager.clientIndex[encryptionIndex] = -1
+		server.encryptionManager.removeEncryptionMapping(&server.clientAddress[clientIndex], server.time)
+		server.clientEncryptionIndex[clientIndex] = -1
+	}
 
-	server.encryptionManager.removeEncryptionMapping(&server.clientAddress[clientIndex], server.time)
+	if server.config.ConnectDisconnectCallback != nil {
+		server.config.ConnectDisconnectCallback(clientIndex, false)
+	}
 
 	server.resetClientSlot(clientIndex)
 }
@@ -499,7 +527,7 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
-	currentTimestamp := uint64(time.Now().Unix())
+	currentTimestamp := nowUnix()
 
 	connectTokenEntryIndex := connectTokenEntriesFindOrAdd(&server.connectTokenEntries,
 		from,
@@ -707,7 +735,7 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 func (server *Server) ProcessPacket(from *Address, packetData []byte) {
 	allowedPackets := serverAllowedPackets()
 
-	currentTimestamp := uint64(time.Now().Unix())
+	currentTimestamp := nowUnix()
 
 	server.readAndProcessPacket(from, packetData, currentTimestamp, &allowedPackets)
 }
@@ -775,7 +803,7 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 func (server *Server) receivePackets() {
 	allowedPackets := serverAllowedPackets()
 
-	currentTimestamp := uint64(time.Now().Unix())
+	currentTimestamp := nowUnix()
 
 	if server.config.NetworkSimulator == nil {
 		// process packets received from sockets
@@ -1051,6 +1079,10 @@ func (server *Server) ConnectLoopbackClient(clientIndex int, clientID uint64, us
 		return
 	}
 
+	if server.config.SendLoopbackPacketCallback == nil {
+		return
+	}
+
 	server.numConnectedClients++
 
 	server.clientLoopback[clientIndex] = true
@@ -1091,6 +1123,12 @@ func (server *Server) DisconnectLoopbackClient(clientIndex int) {
 	printf(LogLevelInfo, "server disconnected loopback client %d\n", clientIndex)
 
 	server.clientDisconnectReason[clientIndex] = DisconnectReasonServerDisconnect
+
+	// mark the slot disconnected before invoking the callback, so the callback may call
+	// back into the server without re-entering this client's disconnect.
+
+	server.clientConnected[clientIndex] = false
+	server.numConnectedClients--
 
 	if server.config.ConnectDisconnectCallback != nil {
 		server.config.ConnectDisconnectCallback(clientIndex, false)
