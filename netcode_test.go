@@ -179,6 +179,12 @@ func TestAddress(t *testing.T) {
 			"...",
 			"....",
 			".....",
+			"[::1]]:80",
+			"[[::1]]",
+			"[::1]:80]",
+			"fe80::1%en0",
+			"[fe80::1%en0]",
+			"[fe80::1%en0]:40000",
 		}
 		for _, s := range badAddresses {
 			if _, err := ParseAddress(s); err == nil {
