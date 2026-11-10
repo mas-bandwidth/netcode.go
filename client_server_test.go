@@ -2068,7 +2068,7 @@ func TestConnectionRequestMappingExpiresWithConnectToken(t *testing.T) {
 	nowUnix = func() uint64 { return token.expireTimestamp - 2 }
 	defer func() { nowUnix = previousNowUnix }()
 
-	server.processConnectionRequestPacket(&from, packet)
+	server.processConnectionRequestPacket(&from, packet, nowUnix())
 
 	check(t, server.encryptionManager.findEncryptionMapping(&from, currentTime) != -1)
 
