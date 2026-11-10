@@ -1987,7 +1987,10 @@ func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 	}
 
 	allocations := after.Mallocs - before.Mallocs
-	if allocations >= datagrams/2 {
+	// the count is of every allocation in the process. under the race detector on Windows
+	// the instrumented runtime's read path allocates (1058 for 2000 datagrams observed in
+	// CI), so the count says nothing about the library there and is checked without -race.
+	if !raceEnabled && allocations >= datagrams/2 {
 		t.Fatalf("%d datagrams dropped on a full receive channel caused %d allocations", datagrams, allocations)
 	}
 }
