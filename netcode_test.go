@@ -1841,3 +1841,98 @@ func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 		t.Fatalf("%d datagrams dropped on a full receive channel caused %d allocations", datagrams, allocations)
 	}
 }
+
+func TestSocketBufferSizeBackOff(t *testing.T) {
+	const requested = 4 * 1024 * 1024
+
+	t.Run("accepts the request on the first try", func(t *testing.T) {
+		calls := 0
+		set := func(size int) error {
+			calls++
+			if size != requested {
+				return errors.New("buffer size refused")
+			}
+			return nil
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, ok)
+		check(t, size == requested)
+		check(t, calls == 1)
+	})
+
+	t.Run("backs off by powers of two to 65536", func(t *testing.T) {
+		const accepted = 65536
+		var attempted []int
+		set := func(size int) error {
+			attempted = append(attempted, size)
+			if size == accepted {
+				return nil
+			}
+			return errors.New("buffer size refused")
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, ok)
+		check(t, size == accepted)
+
+		want := []int{
+			4 * 1024 * 1024,
+			2 * 1024 * 1024,
+			1 * 1024 * 1024,
+			512 * 1024,
+			256 * 1024,
+			128 * 1024,
+			65536,
+		}
+		check(t, len(attempted) == len(want))
+		for i := range want {
+			check(t, attempted[i] == want[i])
+		}
+	})
+
+	// A stock NetBSD refuses anything over about 227 KiB, including 256 KiB.
+	t.Run("accepts 128KiB when 256KiB is refused", func(t *testing.T) {
+		const limit = 227 * 1024
+		calls := 0
+		set := func(size int) error {
+			calls++
+			if size <= limit {
+				return nil
+			}
+			return errors.New("buffer size refused")
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, ok)
+		check(t, size == 128*1024)
+		check(t, calls == 6)
+	})
+
+	t.Run("keeps the OS default when every size is refused", func(t *testing.T) {
+		var attempted []int
+		set := func(size int) error {
+			attempted = append(attempted, size)
+			return errors.New("buffer size refused")
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, !ok)
+		check(t, size == 0)
+		check(t, len(attempted) == 7)
+		check(t, attempted[len(attempted)-1] == 65536)
+	})
+
+	t.Run("does not try a request already below 65536", func(t *testing.T) {
+		calls := 0
+		set := func(int) error {
+			calls++
+			return nil
+		}
+
+		size, ok := setSocketBufferSize(32*1024, set)
+		check(t, !ok)
+		check(t, size == 0)
+		check(t, calls == 0)
+	})
+}
