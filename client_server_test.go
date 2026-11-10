@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1834,6 +1836,66 @@ func TestClientServerSocketReceiveBurst(t *testing.T) {
 	}
 }
 
+// packetTaggingCodepoint is the DSCP value enablePacketTagging sets
+// (expedited forwarding).
+const packetTaggingCodepoint = 46
+
+// packetTaggingSockopt returns the socket option level and name that
+// enablePacketTagging sets, and false on platforms where tagging is not
+// implemented. IPV6_TCLASS is not declared in package syscall on every
+// platform, so its value is given per platform.
+func packetTaggingSockopt(ipv6 bool) (level, opt int, ok bool) {
+	switch runtime.GOOS {
+	case "darwin", "linux", "freebsd", "openbsd", "netbsd":
+	default:
+		return 0, 0, false
+	}
+	if !ipv6 {
+		return syscall.IPPROTO_IP, syscall.IP_TOS, true
+	}
+	switch runtime.GOOS {
+	case "linux":
+		return syscall.IPPROTO_IPV6, 67, true
+	case "darwin":
+		return syscall.IPPROTO_IPV6, 36, true
+	default:
+		return syscall.IPPROTO_IPV6, 61, true
+	}
+}
+
+// getsockoptInt calls get with fd converted to its descriptor type, which is
+// int on unix and syscall.Handle on Windows.
+func getsockoptInt[T ~int | ~uintptr](get func(T, int, int) (int, error), fd uintptr, level, opt int) (int, error) {
+	return get(T(fd), level, opt)
+}
+
+// checkPacketTaggingApplied fails the test unless conn carries the codepoint
+// enablePacketTagging sets.
+func checkPacketTaggingApplied(t *testing.T, conn *net.UDPConn, ipv6 bool) {
+	t.Helper()
+	level, opt, ok := packetTaggingSockopt(ipv6)
+	if !ok {
+		return
+	}
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		t.Fatalf("get raw connection: %v", err)
+	}
+	var value int
+	var sockoptErr error
+	if err := rawConn.Control(func(fd uintptr) {
+		value, sockoptErr = getsockoptInt(syscall.GetsockoptInt, fd, level, opt)
+	}); err != nil {
+		t.Fatalf("control raw connection: %v", err)
+	}
+	if sockoptErr != nil {
+		t.Fatalf("read packet tagging socket option: %v", sockoptErr)
+	}
+	if value != packetTaggingCodepoint {
+		t.Fatalf("expected packet tagging codepoint %d, got %d", packetTaggingCodepoint, value)
+	}
+}
+
 // TestPacketTagging enables packet tagging process-wide, so it restores the
 // flag when the test finishes to keep later tests unaffected.
 func TestPacketTagging(t *testing.T) {
@@ -1843,8 +1905,6 @@ func TestPacketTagging(t *testing.T) {
 	// However, I really recommend providing players with a way to turn it on, since it can significantly reduce
 	// jitter playing over Wi-Fi.
 
-	EnablePacketTagging()
-
 	// Cleanups run in reverse order, so check the restored value after the flag
 	// has been reset.
 	t.Cleanup(func() {
@@ -1853,6 +1913,8 @@ func TestPacketTagging(t *testing.T) {
 		}
 	})
 	t.Cleanup(func() { packetTaggingEnabled = false })
+
+	EnablePacketTagging()
 
 	{
 		serverAddress := "127.0.0.1:40000"
