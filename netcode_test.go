@@ -1146,6 +1146,68 @@ func TestReplayProtection(t *testing.T) {
 	// while packets that fell out of the window are rejected as before
 
 	check(t, replay.alreadyReceived(maxUint64-1-replayProtectionBufferSize))
+
+	// max uint64 is the replay buffer's empty-slot marker, so it is not a valid
+	// received sequence. It must be refused, must never update the most recent
+	// sequence, and must not push otherwise valid sequences out of the window.
+
+	replay.reset()
+
+	check(t, !replay.alreadyReceived(maxUint64-1))
+	replay.advanceSequence(maxUint64 - 1)
+
+	check(t, replay.alreadyReceived(maxUint64))
+	replay.advanceSequence(maxUint64)
+
+	check(t, replay.mostRecentSequence == maxUint64-1)
+	check(t, replay.alreadyReceived(maxUint64))
+	check(t, !replay.alreadyReceived(maxUint64-2))
+
+	// the same sequence must be refused when it arrives in a keep alive packet,
+	// even without replay protection, leaving the window unchanged.
+
+	packetKey := GenerateKey()
+	var buffer [maxPacketBytes]byte
+	bytesWritten := writePacket(&connectionKeepAlive{}, buffer[:], maxUint64, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	allowedPackets := allPacketsAllowed()
+
+	var sequence uint64
+	check(t, readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID,
+		uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil) == nil)
+
+	check(t, readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID,
+		uint64(time.Now().Unix()), 0, nil, &allowedPackets, &replay) == nil)
+	check(t, replay.mostRecentSequence == maxUint64-1)
+	check(t, !replay.alreadyReceived(maxUint64-2))
+
+	// a normal sequence still arrives after the reserved one was refused, and a
+	// replay of that normal packet is still caught
+
+	replay.reset()
+
+	// refusing the reserved sequence at the start of the window must leave the
+	// most recent sequence at zero, so the next normal packet is still accepted
+
+	bytesWritten = writePacket(&connectionKeepAlive{}, buffer[:], maxUint64, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	check(t, readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID,
+		uint64(time.Now().Unix()), 0, nil, &allowedPackets, &replay) == nil)
+	check(t, replay.mostRecentSequence == 0)
+
+	bytesWritten = writePacket(&connectionKeepAlive{}, buffer[:], 1, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	check(t, readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID,
+		uint64(time.Now().Unix()), 0, nil, &allowedPackets, &replay) != nil)
+	check(t, sequence == 1)
+	check(t, replay.mostRecentSequence == 1)
+	check(t, replay.alreadyReceived(1))
+
+	check(t, readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID,
+		uint64(time.Now().Unix()), 0, nil, &allowedPackets, &replay) == nil)
 }
 
 func TestReadPacketRejectsReplay(t *testing.T) {
