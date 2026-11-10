@@ -1630,6 +1630,44 @@ func TestDisableTimeout(t *testing.T) {
 	check(t, clientNumPacketsReceived >= 10 && serverNumPacketsReceived >= 10)
 }
 
+func TestLoopbackStateChangeCallback(t *testing.T) {
+	type stateChange struct {
+		previousState int
+		currentState  int
+	}
+
+	var stateChanges []stateChange
+
+	client := &Client{
+		config: ClientConfig{
+			StateChangeCallback: func(previousState int, currentState int) {
+				stateChanges = append(stateChanges, stateChange{previousState, currentState})
+			},
+			SendLoopbackPacketCallback: func(clientIndex int, packetData []byte, packetSequence uint64) {},
+		},
+		time:                  1000.0,
+		state:                 ClientStateDisconnected,
+		shouldDisconnectState: ClientStateDisconnected,
+	}
+
+	client.ConnectLoopback(0, 2)
+
+	check(t, len(stateChanges) == 1)
+	check(t, stateChanges[0].previousState == ClientStateDisconnected)
+	check(t, stateChanges[0].currentState == ClientStateConnected)
+	check(t, client.State() == ClientStateConnected)
+	check(t, client.Loopback())
+	check(t, client.Index() == 0)
+	check(t, client.MaxClients() == 2)
+
+	client.DisconnectLoopback()
+
+	check(t, len(stateChanges) == 2)
+	check(t, stateChanges[1].previousState == ClientStateConnected)
+	check(t, stateChanges[1].currentState == ClientStateDisconnected)
+	check(t, client.State() == ClientStateDisconnected)
+}
+
 type testLoopbackContext struct {
 	client                         *Client
 	server                         *Server

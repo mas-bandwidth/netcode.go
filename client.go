@@ -680,10 +680,10 @@ func (client *Client) ConnectLoopback(clientIndex int, maxClients int) {
 	}
 
 	printf(LogLevelInfo, "client connected to server via loopback as client %d\n", clientIndex)
-	client.state = ClientStateConnected
 	client.clientIndex = clientIndex
 	client.maxClients = maxClients
 	client.loopback = true
+	client.setState(ClientStateConnected)
 }
 
 // DisconnectLoopback disconnects a client in loopback mode.
