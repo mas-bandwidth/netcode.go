@@ -33,6 +33,8 @@ var servers [maxServers]*netcode.Server
 var clients [maxClients]*netcode.Client
 var packetData [netcode.MaxPacketSize]byte
 var privateKey [netcode.KeyBytes]byte
+var clientWasConnected [maxClients]bool
+var numConnections, numPacketsDelivered uint64
 
 func randomInt(a, b int) int {
 	return a + rand.Intn(b-a+1)
@@ -77,7 +79,12 @@ func soakIteration(time float64) {
 	for i := 0; i < maxServers; i++ {
 		if servers[i] == nil && randomInt(0, 10) == 0 {
 			serverAddress := fmt.Sprintf("127.0.0.1:%d", serverBasePort+i)
-			servers[i], _ = netcode.NewServer(serverAddress, serverConfig, time)
+			var err error
+			servers[i], err = netcode.NewServer(serverAddress, serverConfig, time)
+			if err != nil {
+				fmt.Printf("failed to create server %s (%v)\n", serverAddress, err)
+				os.Exit(1)
+			}
 			fmt.Printf("created server %s\n", serverAddress)
 		}
 
@@ -96,6 +103,7 @@ func soakIteration(time float64) {
 				fmt.Printf("failed to create client (%v)\n", err)
 				os.Exit(1)
 			}
+			clientWasConnected[i] = false
 			fmt.Printf("created client %d\n", i)
 		}
 
@@ -135,6 +143,7 @@ func soakIteration(time float64) {
 						if packet == nil {
 							break
 						}
+						numPacketsDelivered++
 						if !bytes.Equal(packet, packetData[:len(packet)]) {
 							panic("received packet data does not match")
 						}
@@ -182,7 +191,13 @@ func soakIteration(time float64) {
 			clients[i].Disconnect()
 		}
 
-		if clients[i].State() == netcode.ClientStateConnected {
+		connected := clients[i].State() == netcode.ClientStateConnected
+		if connected && !clientWasConnected[i] {
+			numConnections++
+		}
+		clientWasConnected[i] = connected
+
+		if connected {
 			clients[i].SendPacket(packetData[:randomInt(1, netcode.MaxPacketSize)])
 
 			for {
@@ -190,6 +205,7 @@ func soakIteration(time float64) {
 				if packet == nil {
 					break
 				}
+				numPacketsDelivered++
 				if !bytes.Equal(packet, packetData[:len(packet)]) {
 					panic("received packet data does not match")
 				}
@@ -247,4 +263,11 @@ func main() {
 	}
 
 	soakShutdown()
+
+	fmt.Printf("connections = %d, packets delivered = %d\n", numConnections, numPacketsDelivered)
+
+	if numConnections == 0 || numPacketsDelivered == 0 {
+		fmt.Printf("soak made no connections or delivered no packets\n")
+		os.Exit(1)
+	}
 }
