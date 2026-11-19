@@ -37,6 +37,8 @@ affects every implementation of netcode rather than one. Report those the same w
 
 ## Known issue: AEAD nonce reuse on unfinished handshakes and multi-server connect tokens (fixed in v1.2.0)
 
+**Advisory: [GHSA-8mrq-q9c6-h23v](https://github.com/mas-bandwidth/netcode/security/advisories/GHSA-8mrq-q9c6-h23v)** (published 2026-11-19).
+
 **Affected: v1.1.4 and earlier (`NETCODE 1.02`). Fixed in v1.2.0 (`NETCODE 1.03`).**
 
 In `NETCODE 1.02`, packets encrypted directly under the 32-byte `clientToServerKey` and
@@ -66,6 +68,8 @@ to **`NETCODE 1.03`**:
 - Pending connect token history entries bind the 8-byte client salt and expire as admissible
   after `timeoutSeconds` from creation; valid `connection disconnect` packets on a half-open
   mapping consume the history entry and remove the mapping.
+
+Thank you to [@magicaldave](https://github.com/magicaldave) ([DreamWeave-MP/dream-net](https://github.com/DreamWeave-MP/dream-net)) for discovering and privately reporting the unfinished-handshake connect-token reuse issue.
 
 ### If you are using an affected version
 
