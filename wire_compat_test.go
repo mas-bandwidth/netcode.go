@@ -2,6 +2,7 @@ package netcode
 
 import (
 	"bytes"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,6 +54,18 @@ func fixtureS2CKey() [KeyBytes]byte { return [KeyBytes]byte(fixtureKey(5, 2)) }
 func fixtureConnectTokenNonce() [connectTokenNonceBytes]byte {
 	var nonce [connectTokenNonceBytes]byte
 	fixturePattern(nonce[:], 17, 9)
+	return nonce
+}
+
+func fixtureClientSalt() [connectSaltBytes]byte {
+	var salt [connectSaltBytes]byte
+	fixturePattern(salt[:], 19, 21)
+	return salt
+}
+
+func fixtureServerNonce() [serverNonceBytes]byte {
+	var nonce [serverNonceBytes]byte
+	fixturePattern(nonce[:], 23, 29)
 	return nonce
 }
 
@@ -223,6 +236,7 @@ func TestWireCompatConnectionRequestPacket(t *testing.T) {
 		connectTokenExpireTimestamp: fixtureExpireTimestamp,
 		connectTokenNonce:           fixtureConnectTokenNonce(),
 		connectTokenData:            [connectTokenPrivateBytes]byte(encryptedPrivateVector),
+		clientSalt:                  fixtureClientSalt(),
 	}
 	writeWireCompatPacket(t, inputPacket, 0, vector)
 
@@ -236,15 +250,17 @@ func TestWireCompatConnectionRequestPacket(t *testing.T) {
 	check(t, outputPacket.connectTokenExpireTimestamp == fixtureExpireTimestamp)
 	check(t, outputPacket.connectTokenNonce == fixtureConnectTokenNonce())
 	check(t, bytes.Equal(outputPacket.connectTokenData[:connectTokenPrivateBytes-MacBytes], plaintextPrivateVector[:connectTokenPrivateBytes-MacBytes]))
+	check(t, outputPacket.clientSalt == fixtureClientSalt())
 }
 
 func TestWireCompatConnectionDeniedPacket(t *testing.T) {
 	vector := loadVector(t, "packet_connection_denied.bin")
 
-	writeWireCompatPacket(t, &connectionDenied{}, 0x11, vector)
+	writeWireCompatPacket(t, &connectionDenied{serverNonce: fixtureServerNonce()}, 0x11, vector)
 
-	_, ok := readWireCompatPacket(t, vector, 0x11).(*connectionDenied)
+	outputPacket, ok := readWireCompatPacket(t, vector, 0x11).(*connectionDenied)
 	check(t, ok)
+	check(t, outputPacket.serverNonce == fixtureServerNonce())
 }
 
 func TestWireCompatConnectionChallengePacket(t *testing.T) {
@@ -252,6 +268,7 @@ func TestWireCompatConnectionChallengePacket(t *testing.T) {
 	encryptedChallengeToken := loadVector(t, "challenge_token_encrypted.bin")
 
 	inputPacket := &connectionChallenge{
+		serverNonce:            fixtureServerNonce(),
 		challengeTokenSequence: fixtureChallengeSequence,
 		challengeTokenData:     [challengeTokenBytes]byte(encryptedChallengeToken),
 	}
@@ -259,6 +276,7 @@ func TestWireCompatConnectionChallengePacket(t *testing.T) {
 
 	outputPacket, ok := readWireCompatPacket(t, vector, 0x2233).(*connectionChallenge)
 	check(t, ok)
+	check(t, outputPacket.serverNonce == fixtureServerNonce())
 	check(t, outputPacket.challengeTokenSequence == fixtureChallengeSequence)
 	check(t, bytes.Equal(outputPacket.challengeTokenData[:], encryptedChallengeToken))
 }
@@ -312,4 +330,90 @@ func TestWireCompatConnectionDisconnectPacket(t *testing.T) {
 
 	_, ok := readWireCompatPacket(t, vector, 0x556677889900).(*connectionDisconnect)
 	check(t, ok)
+}
+
+func mustDecodeHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("failed to decode hex %q: %v", s, err)
+	}
+	return b
+}
+
+func TestWireCompatDerivePacketKeysKAT(t *testing.T) {
+	c2sKey := fixtureC2SKey()
+	s2cKey := fixtureS2CKey()
+	clientSalt := fixtureClientSalt()
+	serverNonce := fixtureServerNonce()
+
+	check(t, bytes.Equal(c2sKey[:], mustDecodeHex(t, "0104070a0d101316191c1f2225282b2e3134373a3d404346494c4f5255585b5e")))
+	check(t, bytes.Equal(s2cKey[:], mustDecodeHex(t, "02070c11161b20252a2f34393e43484d52575c61666b70757a7f84898e93989d")))
+	check(t, bytes.Equal(clientSalt[:], mustDecodeHex(t, "15283b4e6174879a")))
+	check(t, bytes.Equal(serverNonce[:], mustDecodeHex(t, "1d344b627990a7be")))
+
+	expectedDerivedC2S := [KeyBytes]byte(mustDecodeHex(t, "a5225053ddedabd2fdf737924c4e7cda5c2f334fe78957b499adf7e0ad1471df"))
+	expectedDerivedS2C := [KeyBytes]byte(mustDecodeHex(t, "8be2caf26f26a9bc1710172def250ad1b5bcf543138d7534994ae65ddc25a6fb"))
+
+	derivedC2S := derivePacketKey(c2sKey, clientSalt, serverNonce)
+	derivedS2C := derivePacketKey(s2cKey, clientSalt, serverNonce)
+
+	check(t, derivedC2S == expectedDerivedC2S)
+	check(t, derivedS2C == expectedDerivedS2C)
+	check(t, derivedC2S != c2sKey)
+	check(t, derivedS2C != s2cKey)
+	check(t, derivedC2S != derivedS2C)
+
+	alteredSalt := clientSalt
+	alteredSalt[0] ^= 0x01
+	check(t, derivePacketKey(c2sKey, alteredSalt, serverNonce) != derivedC2S)
+
+	alteredNonce := serverNonce
+	alteredNonce[0] ^= 0x01
+	check(t, derivePacketKey(s2cKey, clientSalt, alteredNonce) != derivedS2C)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = derivePacketKey(c2sKey, clientSalt, serverNonce)
+	})
+	if allocs != 0 {
+		t.Fatalf("derivePacketKey allocated %v times", allocs)
+	}
+
+	// Verify exact C KAT denied and challenge packets under derivedS2C with 30-byte AAD
+	katDenied := mustDecodeHex(t, "8100000000000000801d344b627990a7beeaa7d8857591ae6325d0ed98fd6a36e5")
+	var deniedBuf [maxPacketBytes]byte
+	deniedBytes := writePacket(&connectionDenied{serverNonce: serverNonce}, deniedBuf[:], 1<<63, derivedS2C[:], fixtureProtocolID)
+	check(t, bytes.Equal(deniedBuf[:deniedBytes], katDenied))
+
+	encryptedChallengeToken := loadVector(t, "challenge_token_encrypted.bin")
+	katChallenge := mustDecodeHex(t,
+		"8201000000000000801d344b627990a7"+
+			"bef917e3d7d39f8c91855be72aa43442"+
+			"8d7bc6426be51c900669b85e1f0c60f0"+
+			"6d74c80f93011340b57d463ea47f7257"+
+			"20b15d742207a5d9fee579117b0c50f3"+
+			"d686f60182ec6171431d65988abce1fb"+
+			"8f9244799bf9fee86fd3871dd439a283"+
+			"281698c8e58af7c262dc7531382cefd1"+
+			"a7b7540ebd042e53e6e0470768b98d59"+
+			"443c27081eaa51080c52a6df146ea87a"+
+			"4de99984a8fe4941014689eebbfea0b6"+
+			"068ec1297334a1e02a6e0feee93bd171"+
+			"978d366d2d0c1f383ed6d662842b3f8a"+
+			"2e5eec1ba8acea0c7c14a63a8c8f8190"+
+			"f133f18e8fff17400757c8ba69da4793"+
+			"f6fd52719d763056b12cba0442077ee0"+
+			"35b2a39e4961ccfd4e26c619aa639240"+
+			"408f3e38d7ead88404e69c49b1e99978"+
+			"c6f2daa8d431f35b26cae7c6f5a99c64"+
+			"117cb092ccac74c0f3bba7e2ec2c1c2c"+
+			"6f0ba3f67624f9d49dd3124cfaf7aef6"+
+			"fd46df8ca9")
+	var challengeBuf [maxPacketBytes]byte
+	challengeBytes := writePacket(&connectionChallenge{
+		serverNonce:            serverNonce,
+		challengeTokenSequence: fixtureChallengeSequence,
+		challengeTokenData:     [challengeTokenBytes]byte(encryptedChallengeToken),
+	}, challengeBuf[:], (1<<63)+1, derivedS2C[:], fixtureProtocolID)
+	check(t, bytes.Equal(challengeBuf[:challengeBytes], katChallenge))
 }

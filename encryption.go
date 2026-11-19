@@ -2,11 +2,11 @@ package netcode
 
 const maxEncryptionMappings = MaxClients * 4
 
-// encryptionManager maps packet source addresses to the send and receive keys
-// from the private connect token, so the server can decrypt packets from
-// clients that are mid-handshake or connected. Mappings expire after timeout
-// seconds without being touched, or at an absolute expire time while the
-// client has not yet established a connection.
+// encryptionManager maps packet source addresses to the per-connection derived
+// send and receive keys, clientSalt, and serverNonce so the server can decrypt
+// packets from clients that are mid-handshake or connected. Mappings expire
+// after timeout seconds without being touched, or at an absolute expire time
+// while the client has not yet established a connection.
 type encryptionManager struct {
 	numEncryptionMappings  int
 	timeout                [maxEncryptionMappings]int32
@@ -16,6 +16,8 @@ type encryptionManager struct {
 	clientIndex            [maxEncryptionMappings]int
 	connectTokenEntryIndex [maxEncryptionMappings]int
 	connectTokenMac        [maxEncryptionMappings][MacBytes]byte
+	clientSalt             [maxEncryptionMappings][connectSaltBytes]byte
+	serverNonce            [maxEncryptionMappings][serverNonceBytes]byte
 	sendKey                [maxEncryptionMappings][KeyBytes]byte
 	receiveKey             [maxEncryptionMappings][KeyBytes]byte
 }
@@ -29,6 +31,8 @@ func (m *encryptionManager) reset() {
 		m.clientIndex[i] = -1
 		m.connectTokenEntryIndex[i] = -1
 		m.connectTokenMac[i] = [MacBytes]byte{}
+		m.clientSalt[i] = [connectSaltBytes]byte{}
+		m.serverNonce[i] = [serverNonceBytes]byte{}
 		m.expireTime[i] = -1.0
 		m.lastAccessTime[i] = -1000.0
 		m.address[i] = Address{}
@@ -53,6 +57,8 @@ func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, rece
 			m.lastAccessTime[i] = time
 			m.connectTokenEntryIndex[i] = connectTokenEntryIndex
 			m.setConnectTokenMac(i, tokenMac)
+			m.clientSalt[i] = [connectSaltBytes]byte{}
+			m.serverNonce[i] = [serverNonceBytes]byte{}
 			copy(m.sendKey[i][:], sendKey)
 			copy(m.receiveKey[i][:], receiveKey)
 			return true
@@ -68,6 +74,8 @@ func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, rece
 			m.lastAccessTime[i] = time
 			m.connectTokenEntryIndex[i] = connectTokenEntryIndex
 			m.setConnectTokenMac(i, tokenMac)
+			m.clientSalt[i] = [connectSaltBytes]byte{}
+			m.serverNonce[i] = [serverNonceBytes]byte{}
 			copy(m.sendKey[i][:], sendKey)
 			copy(m.receiveKey[i][:], receiveKey)
 			if i+1 > m.numEncryptionMappings {
@@ -95,6 +103,8 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 			m.lastAccessTime[i] = -1000.0
 			m.connectTokenEntryIndex[i] = -1
 			m.connectTokenMac[i] = [MacBytes]byte{}
+			m.clientSalt[i] = [connectSaltBytes]byte{}
+			m.serverNonce[i] = [serverNonceBytes]byte{}
 			m.address[i] = Address{}
 			m.sendKey[i] = [KeyBytes]byte{}
 			m.receiveKey[i] = [KeyBytes]byte{}
@@ -106,6 +116,9 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 						break
 					}
 					m.address[index].Type = AddressNone
+					m.connectTokenMac[index] = [MacBytes]byte{}
+					m.clientSalt[index] = [connectSaltBytes]byte{}
+					m.serverNonce[index] = [serverNonceBytes]byte{}
 					m.sendKey[index] = [KeyBytes]byte{}
 					m.receiveKey[index] = [KeyBytes]byte{}
 					index--
@@ -124,6 +137,8 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 func (m *encryptionManager) clearExpiredKeys(time float64) {
 	for i := 0; i < m.numEncryptionMappings; i++ {
 		if m.clientIndex[i] == -1 && m.entryExpired(i, time) {
+			m.clientSalt[i] = [connectSaltBytes]byte{}
+			m.serverNonce[i] = [serverNonceBytes]byte{}
 			m.sendKey[i] = [KeyBytes]byte{}
 			m.receiveKey[i] = [KeyBytes]byte{}
 		}
@@ -185,4 +200,11 @@ func (m *encryptionManager) getConnectTokenMac(index int) []byte {
 		return nil
 	}
 	return m.connectTokenMac[index][:]
+}
+
+func (m *encryptionManager) getServerNonce(index int) ([serverNonceBytes]byte, bool) {
+	if index < 0 || index >= m.numEncryptionMappings {
+		return [serverNonceBytes]byte{}, false
+	}
+	return m.serverNonce[index], true
 }

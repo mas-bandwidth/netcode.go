@@ -1,6 +1,9 @@
 package netcode
 
-import "errors"
+import (
+	"crypto/subtle"
+	"errors"
+)
 
 // Server create errors, returned from NewServer and NewServerDual. Bind
 // failures are reported separately from other socket errors because a port
@@ -507,7 +510,10 @@ func (server *Server) findClientIndexByAddress(address *Address) int {
 }
 
 func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest, currentTimestamp uint64) {
-	defer clear(packet.connectTokenData[:])
+	defer func() {
+		clear(packet.connectTokenData[:])
+		clear(packet.clientSalt[:])
+	}()
 
 	var connectTokenPrivate connectTokenPrivate
 	defer func() {
@@ -544,12 +550,16 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
+	connectTokenMac := packet.connectTokenData[connectTokenPrivateBytes-MacBytes:]
+
 	connectTokenEntryIndex := connectTokenEntriesFindOrAdd(&server.connectTokenEntries,
 		from,
-		packet.connectTokenData[connectTokenPrivateBytes-MacBytes:],
+		connectTokenMac,
+		packet.clientSalt,
 		packet.connectTokenExpireTimestamp,
 		currentTimestamp,
-		server.time)
+		server.time,
+		connectTokenPrivate.timeoutSeconds)
 
 	if connectTokenEntryIndex == connectTokenHistoryFull {
 		printf(LogLevelDebug, "server ignored connection request. connect token history is full\n")
@@ -563,7 +573,12 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 
 	if server.numConnectedClients == server.maxClients {
 		printf(LogLevelDebug, "server denied connection request. server is full\n")
-		server.sendGlobalPacket(&connectionDenied{}, from, connectTokenPrivate.serverToClientKey[:])
+		var deniedServerNonce [serverNonceBytes]byte
+		RandomBytes(deniedServerNonce[:])
+		deniedSendKey := derivePacketKey(connectTokenPrivate.serverToClientKey, packet.clientSalt, deniedServerNonce)
+		server.sendGlobalPacket(&connectionDenied{serverNonce: deniedServerNonce}, from, deniedSendKey[:])
+		clear(deniedServerNonce[:])
+		clear(deniedSendKey[:])
 		return
 	}
 
@@ -577,15 +592,48 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		expireTime = server.time + float64(connectTokenPrivate.timeoutSeconds)
 	}
 
-	if !server.encryptionManager.addEncryptionMapping(from,
-		connectTokenPrivate.serverToClientKey[:],
-		connectTokenPrivate.clientToServerKey[:],
-		server.time,
-		expireTime,
-		connectTokenPrivate.timeoutSeconds,
-		connectTokenEntryIndex,
-		packet.connectTokenData[connectTokenPrivateBytes-MacBytes:]) {
-		printf(LogLevelDebug, "server ignored connection request. failed to add encryption mapping\n")
+	encryptionIndex := server.encryptionManager.findEncryptionMapping(from, server.time)
+
+	if encryptionIndex >= 0 &&
+		server.encryptionManager.clientIndex[encryptionIndex] == -1 &&
+		subtle.ConstantTimeCompare(server.encryptionManager.connectTokenMac[encryptionIndex][:], connectTokenMac) == 1 &&
+		subtle.ConstantTimeCompare(server.encryptionManager.clientSalt[encryptionIndex][:], packet.clientSalt[:]) == 1 {
+		server.encryptionManager.setExpireTime(encryptionIndex, expireTime)
+	} else {
+		var serverNonce [serverNonceBytes]byte
+		RandomBytes(serverNonce[:])
+		sendKey := derivePacketKey(connectTokenPrivate.serverToClientKey, packet.clientSalt, serverNonce)
+		receiveKey := derivePacketKey(connectTokenPrivate.clientToServerKey, packet.clientSalt, serverNonce)
+
+		if !server.encryptionManager.addEncryptionMapping(from,
+			sendKey[:],
+			receiveKey[:],
+			server.time,
+			expireTime,
+			connectTokenPrivate.timeoutSeconds,
+			connectTokenEntryIndex,
+			connectTokenMac) {
+			printf(LogLevelDebug, "server ignored connection request. failed to add encryption mapping\n")
+			clear(serverNonce[:])
+			clear(sendKey[:])
+			clear(receiveKey[:])
+			return
+		}
+
+		encryptionIndex = server.encryptionManager.findEncryptionMapping(from, server.time)
+		if encryptionIndex >= 0 {
+			server.encryptionManager.clientSalt[encryptionIndex] = packet.clientSalt
+			server.encryptionManager.serverNonce[encryptionIndex] = serverNonce
+		}
+
+		clear(serverNonce[:])
+		clear(sendKey[:])
+		clear(receiveKey[:])
+	}
+
+	mappingSendKey := server.encryptionManager.getSendKey(encryptionIndex)
+	mappingServerNonce, ok := server.encryptionManager.getServerNonce(encryptionIndex)
+	if mappingSendKey == nil || !ok {
 		return
 	}
 
@@ -595,6 +643,7 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 	}
 
 	challengePacket := &connectionChallenge{
+		serverNonce:            mappingServerNonce,
 		challengeTokenSequence: server.challengeSequence,
 	}
 	challengeToken.write(challengePacket.challengeTokenData[:])
@@ -607,7 +656,7 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 
 	printf(LogLevelDebug, "server sent connection challenge packet\n")
 
-	server.sendGlobalPacket(challengePacket, from, connectTokenPrivate.serverToClientKey[:])
+	server.sendGlobalPacket(challengePacket, from, mappingSendKey)
 }
 
 func (server *Server) findFreeClientIndex() int {
@@ -692,7 +741,11 @@ func (server *Server) processConnectionResponsePacket(from *Address, packet *con
 
 	if server.numConnectedClients == server.maxClients {
 		printf(LogLevelDebug, "server denied connection response. server is full\n")
-		server.sendGlobalPacket(&connectionDenied{}, from, packetSendKey)
+		serverNonce, ok := server.encryptionManager.getServerNonce(encryptionIndex)
+		if !ok {
+			return
+		}
+		server.sendGlobalPacket(&connectionDenied{serverNonce: serverNonce}, from, packetSendKey)
 		return
 	}
 
@@ -713,6 +766,7 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 			server.processConnectionRequestPacket(from, t, currentTimestamp)
 		} else {
 			clear(t.connectTokenData[:])
+			clear(t.clientSalt[:])
 		}
 
 	case *connectionResponse:
@@ -748,6 +802,16 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 		if clientIndex != -1 {
 			printf(LogLevelDebug, "server received disconnect packet from client %d\n", clientIndex)
 			server.disconnectClientInternal(clientIndex, false, DisconnectReasonClientDisconnect)
+		} else if encryptionIndex != -1 {
+			if logLevel >= LogLevelDebug {
+				printf(LogLevelDebug, "server received disconnect packet from %s before connection completed\n", from.String())
+			}
+			connectTokenEntryIndex := server.encryptionManager.getConnectTokenEntryIndex(encryptionIndex)
+			if connectTokenEntryIndex >= 0 {
+				connectTokenEntriesConsume(&server.connectTokenEntries, connectTokenEntryIndex,
+					server.encryptionManager.getConnectTokenMac(encryptionIndex))
+			}
+			server.encryptionManager.removeEncryptionMapping(from, server.time)
 		}
 	}
 }

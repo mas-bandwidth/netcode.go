@@ -197,7 +197,7 @@ jobs:
       # silence it exists to break had moved.
       #
       # These are NOT the protocol version on the wire. That is versionInfo,
-      # "NETCODE 1.02\0", which is protocol identity and never changes.
+      # "NETCODE 1.03\0", which is protocol identity on the wire.
       #
       # If this fails, upstream cut a release. Read what changed, port whatever
       # it implies, then bump VersionFull/Major/Minor/Patch in the same commit.

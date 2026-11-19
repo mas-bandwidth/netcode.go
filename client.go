@@ -1,6 +1,9 @@
 package netcode
 
-import "errors"
+import (
+	"crypto/subtle"
+	"errors"
+)
 
 // Client create errors, returned from NewClient and NewClientDual.
 var (
@@ -61,7 +64,9 @@ type Client struct {
 	socketHolder           socketHolder
 	readPacketKey          [KeyBytes]byte
 	writePacketKey         [KeyBytes]byte
-	hasPacketKeys          bool
+	clientSalt             [connectSaltBytes]byte
+	serverNonce            [serverNonceBytes]byte
+	hasServerNonce         bool
 	replayProtection       replayProtection
 	packetReceiveQueue     packetQueue
 	challengeTokenSequence uint64
@@ -212,7 +217,12 @@ func (client *Client) resetBeforeNextConnect() {
 	client.lastPacketReceiveTime = client.time
 	client.shouldDisconnect = false
 	client.shouldDisconnectState = ClientStateDisconnected
+	client.hasServerNonce = false
 	client.challengeTokenSequence = 0
+	RandomBytes(client.clientSalt[:])
+	client.serverNonce = [serverNonceBytes]byte{}
+	client.readPacketKey = [KeyBytes]byte{}
+	client.writePacketKey = [KeyBytes]byte{}
 	client.challengeTokenData = [challengeTokenBytes]byte{}
 	client.replayProtection.reset()
 }
@@ -228,11 +238,11 @@ func (client *Client) resetConnectionData(clientState int) {
 	client.connectToken = connectToken{}
 	client.readPacketKey = [KeyBytes]byte{}
 	client.writePacketKey = [KeyBytes]byte{}
-	client.hasPacketKeys = false
 
 	client.setState(clientState)
 
 	client.resetBeforeNextConnect()
+	client.clientSalt = [connectSaltBytes]byte{}
 
 	client.packetReceiveQueue.clear()
 }
@@ -271,10 +281,6 @@ func (client *Client) Connect(connectTokenData []byte) {
 		printf(LogLevelInfo, "client connecting to server %s [%d/%d]\n", client.serverAddress.String(), client.serverAddressIndex+1, client.connectToken.numServerAddresses)
 	}
 
-	client.readPacketKey = client.connectToken.serverToClientKey
-	client.writePacketKey = client.connectToken.clientToServerKey
-	client.hasPacketKeys = true
-
 	client.resetBeforeNextConnect()
 
 	client.connectStartTime = client.time
@@ -285,12 +291,16 @@ func (client *Client) Connect(connectTokenData []byte) {
 func (client *Client) processPacketInternal(from *Address, p packet, sequence uint64) {
 	switch t := p.(type) {
 	case *connectionDenied:
-		if (client.state == ClientStateSendingConnectionRequest ||
-			client.state == ClientStateSendingConnectionResponse) &&
-			from.Equal(client.serverAddress) {
+		if client.state == ClientStateSendingConnectionRequest && from.Equal(client.serverAddress) {
 			client.shouldDisconnect = true
 			client.shouldDisconnectState = ClientStateConnectionDenied
 			client.lastPacketReceiveTime = client.time
+		} else if client.state == ClientStateSendingConnectionResponse && from.Equal(client.serverAddress) {
+			if subtle.ConstantTimeCompare(t.serverNonce[:], client.serverNonce[:]) == 1 {
+				client.shouldDisconnect = true
+				client.shouldDisconnectState = ClientStateConnectionDenied
+				client.lastPacketReceiveTime = client.time
+			}
 		}
 
 	case *connectionChallenge:
@@ -352,25 +362,94 @@ func (client *Client) ProcessPacket(from *Address, packetData []byte) {
 		return
 	}
 
+	if client.state <= ClientStateDisconnected {
+		return
+	}
+
 	allowedPackets := [connectionNumPackets]bool{}
-	allowedPackets[connectionDeniedPacket] = true
-	allowedPackets[connectionChallengePacket] = true
-	allowedPackets[connectionKeepAlivePacket] = true
-	allowedPackets[connectionPayloadPacket] = true
-	allowedPackets[connectionDisconnectPacket] = true
 
 	currentTimestamp := nowUnix()
 
-	var readPacketKey []byte
-	if client.hasPacketKeys {
-		readPacketKey = client.readPacketKey[:]
+	var sequence uint64
+
+	if client.state == ClientStateSendingConnectionRequest {
+		if len(packetData) < 1+1+serverNonceBytes+MacBytes {
+			return
+		}
+
+		prefixByte := packetData[0]
+		packetType := prefixByte & 0xF
+		sequenceBytes := int(prefixByte >> 4)
+
+		if packetType != connectionDeniedPacket && packetType != connectionChallengePacket {
+			return
+		}
+
+		if sequenceBytes < 1 || sequenceBytes > 8 {
+			return
+		}
+
+		if len(packetData) < 1+sequenceBytes+serverNonceBytes+MacBytes {
+			return
+		}
+
+		allowedPackets[connectionDeniedPacket] = true
+		allowedPackets[connectionChallengePacket] = true
+
+		var candidateServerNonce [serverNonceBytes]byte
+		copy(candidateServerNonce[:], packetData[1+sequenceBytes:1+sequenceBytes+serverNonceBytes])
+
+		candidateReadKey := derivePacketKey(client.connectToken.serverToClientKey, client.clientSalt, candidateServerNonce)
+
+		packet := readPacket(packetData,
+			&sequence,
+			candidateReadKey[:],
+			client.connectToken.protocolID,
+			currentTimestamp,
+			0,
+			nil,
+			&allowedPackets,
+			&client.replayProtection)
+
+		if packet == nil {
+			clear(candidateReadKey[:])
+			return
+		}
+
+		if packet.packetType() == connectionChallengePacket {
+			client.serverNonce = candidateServerNonce
+			client.hasServerNonce = true
+			client.readPacketKey = candidateReadKey
+			client.writePacketKey = derivePacketKey(client.connectToken.clientToServerKey, client.clientSalt, candidateServerNonce)
+		}
+
+		clear(candidateReadKey[:])
+
+		client.processPacketInternal(from, packet, sequence)
+		return
 	}
 
-	var sequence uint64
+	switch client.state {
+	case ClientStateSendingConnectionResponse:
+		allowedPackets[connectionDeniedPacket] = true
+		allowedPackets[connectionKeepAlivePacket] = true
+		allowedPackets[connectionPayloadPacket] = true
+		allowedPackets[connectionDisconnectPacket] = true
+	case ClientStateConnected:
+		allowedPackets[connectionKeepAlivePacket] = true
+		allowedPackets[connectionPayloadPacket] = true
+		allowedPackets[connectionDisconnectPacket] = true
+	default:
+		return
+	}
+
+	if !client.hasServerNonce {
+		return
+	}
 
 	packet := readPacket(packetData,
 		&sequence,
-		readPacketKey,
+		client.readPacketKey[:],
 		client.connectToken.protocolID,
 		currentTimestamp,
 		0,
@@ -474,6 +553,7 @@ func (client *Client) sendPackets() {
 			connectTokenExpireTimestamp: client.connectToken.expireTimestamp,
 			connectTokenNonce:           client.connectToken.nonce,
 			connectTokenData:            client.connectToken.privateData,
+			clientSalt:                  client.clientSalt,
 		}
 		client.sendPacketToServerInternal(packet)
 
@@ -655,7 +735,7 @@ func (client *Client) disconnectInternal(destinationState int, sendDisconnectPac
 
 	printf(LogLevelInfo, "client disconnected\n")
 
-	if !client.loopback && sendDisconnectPackets && client.state > ClientStateDisconnected {
+	if !client.loopback && sendDisconnectPackets && client.state > ClientStateDisconnected && client.hasServerNonce {
 		printf(LogLevelDebug, "client sent disconnect packets to server\n")
 
 		for i := 0; i < numDisconnectPackets; i++ {

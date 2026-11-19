@@ -514,6 +514,7 @@ func TestConnectionRequestPacket(t *testing.T) {
 		connectTokenNonce:           connectTokenNonce,
 		connectTokenData:            encryptedConnectTokenData,
 	}
+	RandomBytes(inputPacket.clientSalt[:])
 
 	// write the connection request packet to a buffer
 
@@ -522,14 +523,15 @@ func TestConnectionRequestPacket(t *testing.T) {
 
 	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
 
-	check(t, bytesWritten > 0)
+	check(t, bytesWritten == connectionRequestPacketBytes)
 
 	// read the connection request packet back in from the buffer (the connect token data is decrypted as part of the read packet validation)
 
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, connectTokenKey, &allowedPackets, nil).(*connectionRequest)
+	readBuf := append([]byte(nil), buffer[:bytesWritten]...)
+	outputPacket, ok := readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, connectTokenKey, &allowedPackets, nil).(*connectionRequest)
 
 	check(t, ok)
 
@@ -540,12 +542,23 @@ func TestConnectionRequestPacket(t *testing.T) {
 	check(t, outputPacket.connectTokenExpireTimestamp == inputPacket.connectTokenExpireTimestamp)
 	check(t, outputPacket.connectTokenNonce == inputPacket.connectTokenNonce)
 	check(t, bytes.Equal(outputPacket.connectTokenData[:connectTokenPrivateBytes-MacBytes], connectTokenData[:connectTokenPrivateBytes-MacBytes]))
+	check(t, outputPacket.clientSalt == inputPacket.clientSalt)
+
+	// a 1078-byte NETCODE 1.02 request or wrong version string must be rejected
+
+	readBuf = append([]byte(nil), buffer[:bytesWritten-connectSaltBytes]...)
+	check(t, readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, connectTokenKey, &allowedPackets, nil) == nil)
+
+	readBuf = append([]byte(nil), buffer[:bytesWritten]...)
+	readBuf[1+11] = '2'
+	check(t, readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, connectTokenKey, &allowedPackets, nil) == nil)
 }
 
 func TestConnectionDeniedPacket(t *testing.T) {
 	// setup a connection denied packet
 
 	inputPacket := &connectionDenied{}
+	RandomBytes(inputPacket.serverNonce[:])
 
 	// write the packet to a buffer
 
@@ -554,24 +567,36 @@ func TestConnectionDeniedPacket(t *testing.T) {
 
 	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
 
-	check(t, bytesWritten > 0)
+	check(t, bytesWritten == 1+2+serverNonceBytes+MacBytes)
 
 	// read the packet back in from the buffer
 
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionDenied)
+	readBuf := append([]byte(nil), buffer[:bytesWritten]...)
+	outputPacket, ok := readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionDenied)
 
 	check(t, ok)
 	check(t, outputPacket != nil)
 	check(t, sequence == 1000)
+	check(t, outputPacket.serverNonce == inputPacket.serverNonce)
+
+	// tampering with serverNonce or truncating below headerNonceBytes + MAC is rejected
+
+	readBuf = append([]byte(nil), buffer[:bytesWritten]...)
+	readBuf[1+int(readBuf[0]>>4)] ^= 0x01
+	check(t, readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil) == nil)
+
+	readBuf = append([]byte(nil), buffer[:bytesWritten-1]...)
+	check(t, readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil) == nil)
 }
 
 func TestConnectionChallengePacket(t *testing.T) {
 	// setup a connection challenge packet
 
 	inputPacket := &connectionChallenge{}
+	RandomBytes(inputPacket.serverNonce[:])
 	inputPacket.challengeTokenSequence = 0
 	RandomBytes(inputPacket.challengeTokenData[:])
 
@@ -582,21 +607,29 @@ func TestConnectionChallengePacket(t *testing.T) {
 
 	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
 
-	check(t, bytesWritten > 0)
+	check(t, bytesWritten == 1+2+serverNonceBytes+8+challengeTokenBytes+MacBytes)
 
 	// read the packet back in from the buffer
 
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionChallenge)
+	readBuf := append([]byte(nil), buffer[:bytesWritten]...)
+	outputPacket, ok := readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionChallenge)
 
 	check(t, ok)
 
 	// make sure the read packet matches what was written
 
+	check(t, outputPacket.serverNonce == inputPacket.serverNonce)
 	check(t, outputPacket.challengeTokenSequence == inputPacket.challengeTokenSequence)
 	check(t, outputPacket.challengeTokenData == inputPacket.challengeTokenData)
+
+	// tampering with serverNonce in the cleartext header is rejected by 30-byte AAD
+
+	readBuf = append([]byte(nil), buffer[:bytesWritten]...)
+	readBuf[1+int(readBuf[0]>>4)] ^= 0x01
+	check(t, readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil) == nil)
 }
 
 func TestConnectionResponsePacket(t *testing.T) {
@@ -798,7 +831,12 @@ func TestReadPacketRejectsInvalidPackets(t *testing.T) {
 			// a flipped ciphertext or tag byte is refused
 
 			tampered := append([]byte(nil), buffer[:bytesWritten]...)
-			tampered[bytesWritten-1] ^= 0xFF
+			tagByteIndex := bytesWritten - 1
+			if testCase.packet.packetType() == connectionRequestPacket {
+				// connection request appends an unencrypted 8-byte clientSalt after the connect token MAC
+				tagByteIndex = bytesWritten - connectSaltBytes - 1
+			}
+			tampered[tagByteIndex] ^= 0xFF
 			check(t, read(tampered, packetKey, testProtocolID, testCase.private) == nil)
 
 			// a wrong key is refused
@@ -1396,9 +1434,9 @@ func TestConnectLoopbackRequiresSendLoopbackPacketCallback(t *testing.T) {
 
 func TestVersionConstants(t *testing.T) {
 	check(t, VersionMajor == 1)
-	check(t, VersionMinor == 4)
-	check(t, VersionPatch == 10)
-	check(t, VersionFull == "1.4.10")
+	check(t, VersionMinor == 5)
+	check(t, VersionPatch == 0)
+	check(t, VersionFull == "1.5.0")
 }
 
 func TestInitAndDefaults(t *testing.T) {

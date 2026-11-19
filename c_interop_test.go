@@ -99,6 +99,7 @@ func cInteropPayload() []byte {
 // challenge/response, keep-alive and payload packets must round trip between
 // the two implementations.
 func TestCInteropClientConnectsToCServer(t *testing.T) {
+	auditor := startNonceAudit(t)
 	serverBinary := cInteropBinary(t, "server")
 
 	serverAddress := "127.0.0.1:40100"
@@ -149,6 +150,9 @@ func TestCInteropClientConnectsToCServer(t *testing.T) {
 		}
 
 		if client.State() == ClientStateConnected && payloadPacketsReceived >= 10 {
+			pairs, repeats := auditor.stats()
+			check(t, pairs > 0)
+			check(t, repeats == 0)
 			return // success: connected to the C server and exchanged payload packets
 		}
 
@@ -164,6 +168,7 @@ func TestCInteropClientConnectsToCServer(t *testing.T) {
 // by the C implementation with libsodium, and complete the handshake and
 // payload exchange with the C client.
 func TestCInteropCClientConnectsToGoServer(t *testing.T) {
+	auditor := startNonceAudit(t)
 	clientBinary := cInteropBinary(t, "client")
 
 	serverAddress := "127.0.0.1:40200"
@@ -209,6 +214,9 @@ func TestCInteropCClientConnectsToGoServer(t *testing.T) {
 		}
 
 		if server.ClientConnected(0) && payloadPacketsReceived >= 10 {
+			pairs, repeats := auditor.stats()
+			check(t, pairs > 0)
+			check(t, repeats == 0)
 			return // success: the C client connected and exchanged payload packets
 		}
 
@@ -217,4 +225,86 @@ func TestCInteropCClientConnectsToGoServer(t *testing.T) {
 
 	t.Fatalf("timed out: %d clients connected, %d payload packets received from C client",
 		server.NumConnectedClients(), payloadPacketsReceived)
+}
+
+// TestCInteropMultiServerFailoverToCServer exercises NETCODE 1.03 multi-server
+// failover across a full Go server (emitting connection denied with serverNonce
+// + 30-byte AAD) to a live C reference server (rotating clientSalt and
+// completing the handshake + payload exchange).
+func TestCInteropMultiServerFailoverToCServer(t *testing.T) {
+	auditor := startNonceAudit(t)
+	serverBinary := cInteropBinary(t, "server")
+
+	fullGoServerAddress := "127.0.0.1:40300"
+	cServerAddress := "127.0.0.1:40301"
+
+	fullServer, err := NewServer(fullGoServerAddress, &ServerConfig{
+		ProtocolID:                 testProtocolID,
+		PrivateKey:                 testPrivateKey,
+		SendLoopbackPacketCallback: func(clientIndex int, packetData []byte, packetSequence uint64) {},
+	}, 0.0)
+	check(t, err == nil)
+	defer fullServer.Close()
+
+	fullServer.Start(1)
+	fullServer.ConnectLoopbackClient(0, 999, nil)
+	check(t, fullServer.NumConnectedClients() == 1)
+
+	startCBinary(t, serverBinary, cServerAddress)
+
+	client, err := NewClient("0.0.0.0:0", nil, 0.0)
+	check(t, err == nil)
+	defer client.Close()
+
+	time.Sleep(cServerStartupDelay)
+	waitForNextSecond()
+
+	serverAddresses := []string{fullGoServerAddress, cServerAddress}
+	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
+		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+	check(t, err == nil)
+
+	client.Connect(connectToken)
+
+	payload := cInteropPayload()
+	payloadPacketsReceived := 0
+
+	start := time.Now()
+	deadline := start.Add(cInteropTimeout)
+
+	for time.Now().Before(deadline) {
+		currentTime := time.Since(start).Seconds()
+
+		fullServer.Update(currentTime)
+		client.Update(currentTime)
+
+		if client.State() == ClientStateConnected {
+			client.SendPacket(payload)
+		}
+
+		for {
+			packet, _ := client.ReceivePacket()
+			if packet == nil {
+				break
+			}
+			check(t, bytes.Equal(packet, payload))
+			payloadPacketsReceived++
+		}
+
+		if client.State() <= ClientStateDisconnected {
+			t.Fatalf("client failed to fail over to C server: %s", ClientStateName(client.State()))
+		}
+
+		if client.State() == ClientStateConnected && payloadPacketsReceived >= 10 {
+			pairs, repeats := auditor.stats()
+			check(t, pairs > 0)
+			check(t, repeats == 0)
+			return
+		}
+
+		time.Sleep(time.Second / 60)
+	}
+
+	t.Fatalf("timed out: client state %q, %d payload packets received from C server",
+		ClientStateName(client.State()), payloadPacketsReceived)
 }

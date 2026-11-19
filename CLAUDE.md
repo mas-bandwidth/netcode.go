@@ -6,14 +6,16 @@ linked from our README as a community implementation). Module path ends `.go`; t
 
 DECISIONS
 - Three version numbers live here. Exactly one of them tracks C.
-  1. Module/tag version: its own line, v1.0.0 -> v1.1.4. It does not track C's numbering.
-  2. Exported `VersionFull` "1.4.10": the C release this port corresponds to, mirroring
+  1. Module/tag version: its own line, v1.0.0 -> v1.2.0. It does not track C's numbering.
+  2. Exported `VersionFull` "1.5.0": the C release this port corresponds to, mirroring
      NETCODE_VERSION_* in C's netcode.h. It DOES track C. This was open until #11: the
      constant sat at 1.3.5 from the first commit, through C's 1.4.0 security release, so
      the library advertised a version predating a fix it already carried. CI now enforces
      the match (version-sync). Bump all four Full/Major/Minor/Patch together.
-  3. `versionInfo` "NETCODE 1.02": the on-the-wire PROTOCOL version. It never moves.
+  3. `versionInfo` "NETCODE 1.03": the on-the-wire PROTOCOL version (upgraded from
+     "NETCODE 1.02" in C 1.5.0 / v1.2.0).
 - C 1.4.0's AEAD nonce-reuse fix IS ported: commit 2336bed (C dc21b70), shipped in v1.1.0.
+- C 1.5.0's NETCODE 1.03 per-connection HChaCha20 key derivation IS ported in v1.2.0.
 
 INVARIANTS
 - Wire compatibility with the C reference is the prime directive. C is normative: where the
