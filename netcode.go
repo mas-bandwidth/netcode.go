@@ -1,5 +1,5 @@
 /*
-Package netcode implements the netcode 1.02 protocol: a simple protocol
+Package netcode implements the netcode 1.03 protocol: a simple protocol
 for creating secure client/server connections over UDP.
 
 This is a faithful port of the C reference implementation at
@@ -47,12 +47,12 @@ var nowUnix = func() uint64 { return uint64(time.Now().Unix()) }
 // The version of the C reference implementation this port corresponds to,
 // mirroring NETCODE_VERSION_* in its netcode.h. This is not the version of this
 // Go module, which is tagged independently, and it is not the protocol version
-// on the wire: that is versionInfo below, which never changes.
+// on the wire: that is versionInfo below.
 const (
-	VersionFull  = "1.4.10"
+	VersionFull  = "1.5.0"
 	VersionMajor = 1
-	VersionMinor = 4
-	VersionPatch = 10
+	VersionMinor = 5
+	VersionPatch = 0
 )
 
 const (
@@ -69,6 +69,8 @@ const (
 const (
 	connectTokenNonceBytes     = 24
 	connectTokenPrivateBytes   = 1024
+	connectSaltBytes           = 8
+	serverNonceBytes           = 8
 	challengeTokenBytes        = 300
 	versionInfoBytes           = 13
 	maxPacketBytes             = 1300
@@ -79,8 +81,8 @@ const (
 )
 
 // versionInfo is written to unencrypted packet headers and mixed into the AEAD
-// associated data. "NETCODE 1.02" ASCII with null terminator (13 bytes).
-var versionInfo = [versionInfoBytes]byte{'N', 'E', 'T', 'C', 'O', 'D', 'E', ' ', '1', '.', '0', '2', 0}
+// associated data. "NETCODE 1.03" ASCII with null terminator (13 bytes).
+var versionInfo = [versionInfoBytes]byte{'N', 'E', 'T', 'C', 'O', 'D', 'E', ' ', '1', '.', '0', '3', 0}
 
 const (
 	packetSendRate       = 10.0

@@ -4,15 +4,17 @@ import (
 	"crypto/rand"
 	"errors"
 
+	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
 // The C implementation uses libsodium. The equivalent primitives here are:
 //
+//	crypto_core_hchacha20                -> chacha20.HChaCha20     (16 byte input)
 //	crypto_aead_chacha20poly1305_ietf_*  -> chacha20poly1305.New   (12 byte nonce)
 //	crypto_aead_xchacha20poly1305_ietf_* -> chacha20poly1305.NewX  (24 byte nonce)
 //
-// Both produce a 16 byte poly1305 MAC appended to the ciphertext.
+// Both AEADs produce a 16 byte poly1305 MAC appended to the ciphertext.
 
 var errDecryptFailed = errors.New("netcode: failed to decrypt")
 
@@ -83,6 +85,27 @@ func decryptAEAD(message []byte, messageLength int, additional []byte, nonce []b
 		return errDecryptFailed
 	}
 	return nil
+}
+
+// derivePacketKey derives a 32-byte per-connection packet key from a 32-byte
+// connect token root key, an 8-byte client salt, and an 8-byte server nonce:
+//
+//	HChaCha20(tokenKey, clientSalt || serverNonce)
+func derivePacketKey(tokenKey [KeyBytes]byte, clientSalt [connectSaltBytes]byte, serverNonce [serverNonceBytes]byte) [KeyBytes]byte {
+	var input [connectSaltBytes + serverNonceBytes]byte
+	copy(input[:connectSaltBytes], clientSalt[:])
+	copy(input[connectSaltBytes:], serverNonce[:])
+
+	derivedSlice, err := chacha20.HChaCha20(tokenKey[:], input[:])
+	clear(input[:])
+	if err != nil {
+		panic(err) // fixed-size 32-byte key and 16-byte input never fail length validation
+	}
+
+	var derived [KeyBytes]byte
+	copy(derived[:], derivedSlice)
+	clear(derivedSlice)
+	return derived
 }
 
 // packetNonce constructs the 96 bit nonce used for packet and challenge token
