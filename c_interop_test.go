@@ -74,13 +74,25 @@ func startCBinary(t *testing.T, binary string, args ...string) {
 	})
 }
 
-// waitForNextSecond sleeps until the wall clock reaches the next whole second. A
-// server refuses a connect token issued in the second it started, so a test on
-// the real clock waits for the next second after the server starts before a
-// token is issued.
+// waitForNextSecond sleeps until the wall clock has advanced into the next whole
+// second, plus a 50ms margin. A server refuses a connect token issued in the
+// second it started, so a test on the real clock waits for the next second after
+// the server starts before a token is issued. On Linux, Go's time.Now() reads
+// CLOCK_REALTIME while C's time(NULL) in netcode_generate_connect_token reads
+// CLOCK_REALTIME_COARSE via the vDSO, which can lag CLOCK_REALTIME by one kernel
+// tick across a whole-second boundary; the extra 50ms ensures both clocks observe
+// the new second.
 func waitForNextSecond() {
-	now := time.Now()
-	time.Sleep(now.Truncate(time.Second).Add(time.Second).Sub(now))
+	startSecond := time.Now().Unix()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Unix() <= startSecond && time.Now().Before(deadline) {
+		remaining := time.Second - time.Duration(time.Now().Nanosecond())
+		if remaining < time.Millisecond {
+			remaining = time.Millisecond
+		}
+		time.Sleep(remaining)
+	}
+	time.Sleep(50 * time.Millisecond)
 }
 
 func cInteropPayload() []byte {
