@@ -105,10 +105,10 @@ Upgrade to v1.1.0 or later:
 
 ### Where affected versions can still be obtained
 
-`go.mod` carries a `retract [v1.0.0, v1.0.2]` directive, so `go get` warns. That is the only
+`go.mod` carries a `retract [v1.0.0, v1.1.4]` directive, so `go get` warns. That is the only
 lever available: **the Go module proxy is an immutable cache**, so those versions remain
 fetchable forever and cannot be withdrawn by anyone, including us. The retraction and the
-advisory above exist precisely because removal is impossible.
+advisories above exist precisely because removal is impossible.
 
 ### Related
 
