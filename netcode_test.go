@@ -1604,7 +1604,7 @@ func TestSocketDropSender(t *testing.T) {
 
 	conn, err := net.Dial("udp4", address)
 	check(t, err == nil)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	var gate [1]byte
 	_, err = os.Stdin.Read(gate[:])
@@ -1684,7 +1684,7 @@ func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
 
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	check(t, err == nil)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestSocketDropSender$")
 	cmd.Env = append(os.Environ(),
