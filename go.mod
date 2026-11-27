@@ -3,8 +3,8 @@ module github.com/mas-bandwidth/netcode.go
 go 1.26.0
 
 require (
-	golang.org/x/crypto v0.55.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/crypto v0.59.0
+	golang.org/x/sys v0.50.0
 )
 
 // SECURITY: v1.0.0 through v1.1.4 implement NETCODE 1.02 and are affected by
