@@ -1,5 +1,7 @@
 package netcode
 
+import "crypto/subtle"
+
 const maxConnectTokenEntries = MaxClients * 8
 
 const (
@@ -19,6 +21,7 @@ type connectTokenEntry struct {
 	time            float64
 	expireTimestamp uint64
 	mac             [MacBytes]byte
+	clientSalt      [connectSaltBytes]byte
 	address         Address
 }
 
@@ -28,6 +31,7 @@ func connectTokenEntriesReset(entries *[maxConnectTokenEntries]connectTokenEntry
 		entries[i].time = -1000.0
 		entries[i].expireTimestamp = 0
 		entries[i].mac = [MacBytes]byte{}
+		entries[i].clientSalt = [connectSaltBytes]byte{}
 		entries[i].address = Address{}
 	}
 }
@@ -37,10 +41,12 @@ func connectTokenEntriesReset(entries *[maxConnectTokenEntries]connectTokenEntry
 // connectTokenEntryRefused and connectTokenHistoryFull.
 //
 // An entry is created pending the first time a connect token is seen, and becomes consumed
-// when the client that presented it is installed in a client slot. A pending entry admits
-// a retransmitted connection request from the address that created it, so a handshake that
-// loses a packet still completes. A consumed entry admits nothing, whatever the address, so
-// the keys inside a connect token encrypt exactly one session.
+// when the client that presented it is installed in a client slot or aborts the handshake
+// with a disconnect packet. A pending entry admits a retransmitted connection request from
+// the address and clientSalt that created it within timeoutSeconds of creation (when
+// timeoutSeconds is positive), so a handshake that loses a packet still completes without
+// reopening the token for another attempt. A consumed entry admits nothing, whatever the
+// address, so a connect token is usable for at most one session.
 //
 // An entry lives until its connect token expires. A history whose entries all hold unexpired
 // connect tokens refuses a new connect token instead of evicting one, because evicting is
@@ -48,9 +54,11 @@ func connectTokenEntriesReset(entries *[maxConnectTokenEntries]connectTokenEntry
 func connectTokenEntriesFindOrAdd(entries *[maxConnectTokenEntries]connectTokenEntry,
 	address *Address,
 	mac []byte,
+	clientSalt [connectSaltBytes]byte,
 	expireTimestamp uint64,
 	currentTimestamp uint64,
-	time float64) int {
+	time float64,
+	timeoutSeconds int32) int {
 
 	// find the matching entry for the token mac and the first entry free to take a new token.
 	// constant time worst case. This is intentional!
@@ -59,7 +67,7 @@ func connectTokenEntriesFindOrAdd(entries *[maxConnectTokenEntries]connectTokenE
 	freeTokenIndex := -1
 
 	for i := 0; i < maxConnectTokenEntries; i++ {
-		if entries[i].state != connectTokenEntryFree && [MacBytes]byte(mac) == entries[i].mac {
+		if entries[i].state != connectTokenEntryFree && subtle.ConstantTimeCompare(mac, entries[i].mac[:]) == 1 {
 			matchingTokenIndex = i
 		}
 
@@ -81,22 +89,33 @@ func connectTokenEntriesFindOrAdd(entries *[maxConnectTokenEntries]connectTokenE
 		entries[freeTokenIndex].expireTimestamp = expireTimestamp
 		entries[freeTokenIndex].address = *address
 		copy(entries[freeTokenIndex].mac[:], mac)
+		entries[freeTokenIndex].clientSalt = clientSalt
 		return freeTokenIndex
 	}
 
-	// a pending entry admits the address that created it, and nothing else. a consumed entry admits nothing.
-	// the entry time is set when the entry is created and is never refreshed.
+	// a pending entry admits the address and clientSalt that created it within timeoutSeconds
+	// of creation, and nothing else. a consumed entry admits nothing. the entry time is set when
+	// the entry is created and is never refreshed.
 
 	if entries[matchingTokenIndex].state == connectTokenEntryPending &&
-		entries[matchingTokenIndex].address.Equal(*address) {
+		entries[matchingTokenIndex].address.Equal(*address) &&
+		subtle.ConstantTimeCompare(entries[matchingTokenIndex].clientSalt[:], clientSalt[:]) == 1 &&
+		(timeoutSeconds <= 0 || entries[matchingTokenIndex].time+float64(timeoutSeconds) >= time) {
 		return matchingTokenIndex
 	}
 
 	return connectTokenEntryRefused
 }
 
-func connectTokenEntriesConsume(entries *[maxConnectTokenEntries]connectTokenEntry, index int) {
-	if index >= 0 && index < maxConnectTokenEntries {
+// connectTokenEntriesConsume marks the entry at index consumed if it still holds
+// the given connect token MAC. The index alone is not enough: an expired token's
+// entry may have been reused by a different token, in which case consuming it
+// would refuse the token that now owns the slot.
+func connectTokenEntriesConsume(entries *[maxConnectTokenEntries]connectTokenEntry, index int, mac []byte) {
+	if index >= 0 && index < maxConnectTokenEntries &&
+		entries[index].state != connectTokenEntryFree &&
+		len(mac) == MacBytes &&
+		subtle.ConstantTimeCompare(mac, entries[index].mac[:]) == 1 {
 		entries[index].state = connectTokenEntryConsumed
 	}
 }

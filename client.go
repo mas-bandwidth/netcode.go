@@ -1,8 +1,8 @@
 package netcode
 
 import (
+	"crypto/subtle"
 	"errors"
-	"time"
 )
 
 // Client create errors, returned from NewClient and NewClientDual.
@@ -12,6 +12,10 @@ var (
 	ErrClientSimulatorRequiresPort  = errors.New("netcode: must bind to a specific port when using network simulator")
 	ErrClientCreateSocketIPv4Failed = errors.New("netcode: failed to create client ipv4 socket")
 	ErrClientCreateSocketIPv6Failed = errors.New("netcode: failed to create client ipv6 socket")
+
+	// ErrClientOverrideCallbacksRequired is returned when OverrideSendAndReceive
+	// is set but SendPacketOverride or ReceivePacketOverride is nil.
+	ErrClientOverrideCallbacksRequired = errors.New("netcode: OverrideSendAndReceive requires both SendPacketOverride and ReceivePacketOverride")
 )
 
 // ClientConfig configures a Client. The zero value gives working defaults:
@@ -60,7 +64,9 @@ type Client struct {
 	socketHolder           socketHolder
 	readPacketKey          [KeyBytes]byte
 	writePacketKey         [KeyBytes]byte
-	hasPacketKeys          bool
+	clientSalt             [connectSaltBytes]byte
+	serverNonce            [serverNonceBytes]byte
+	hasServerNonce         bool
 	replayProtection       replayProtection
 	packetReceiveQueue     packetQueue
 	challengeTokenSequence uint64
@@ -98,6 +104,11 @@ func NewClientDual(address1String string, address2String string, config *ClientC
 		configCopy = *config
 	}
 	config = &configCopy
+
+	if config.OverrideSendAndReceive && (config.SendPacketOverride == nil || config.ReceivePacketOverride == nil) {
+		printf(LogLevelError, "error: OverrideSendAndReceive requires SendPacketOverride and ReceivePacketOverride\n")
+		return nil, ErrClientOverrideCallbacksRequired
+	}
 
 	address1, err := ParseAddress(address1String)
 	if err != nil {
@@ -202,12 +213,16 @@ func (client *Client) setState(clientState int) {
 }
 
 func (client *Client) resetBeforeNextConnect() {
-	client.connectStartTime = client.time
 	client.lastPacketSendTime = client.time - 1.0
 	client.lastPacketReceiveTime = client.time
 	client.shouldDisconnect = false
 	client.shouldDisconnectState = ClientStateDisconnected
+	client.hasServerNonce = false
 	client.challengeTokenSequence = 0
+	RandomBytes(client.clientSalt[:])
+	client.serverNonce = [serverNonceBytes]byte{}
+	client.readPacketKey = [KeyBytes]byte{}
+	client.writePacketKey = [KeyBytes]byte{}
 	client.challengeTokenData = [challengeTokenBytes]byte{}
 	client.replayProtection.reset()
 }
@@ -223,11 +238,11 @@ func (client *Client) resetConnectionData(clientState int) {
 	client.connectToken = connectToken{}
 	client.readPacketKey = [KeyBytes]byte{}
 	client.writePacketKey = [KeyBytes]byte{}
-	client.hasPacketKeys = false
 
 	client.setState(clientState)
 
 	client.resetBeforeNextConnect()
+	client.clientSalt = [connectSaltBytes]byte{}
 
 	client.packetReceiveQueue.clear()
 }
@@ -244,8 +259,21 @@ func (client *Client) Connect(connectTokenData []byte) {
 		return
 	}
 
-	client.serverAddressIndex = 0
-	client.serverAddress = client.connectToken.serverAddresses[0]
+	serverAddressIndex := -1
+	for i := 0; i < client.connectToken.numServerAddresses; i++ {
+		if client.canReachServerAddress(&client.connectToken.serverAddresses[i]) {
+			serverAddressIndex = i
+			break
+		}
+	}
+	if serverAddressIndex < 0 {
+		client.connectToken = connectToken{}
+		client.setState(ClientStateInvalidConnectToken)
+		return
+	}
+
+	client.serverAddressIndex = serverAddressIndex
+	client.serverAddress = client.connectToken.serverAddresses[serverAddressIndex]
 
 	if client.connectToken.numServerAddresses == 1 {
 		printf(LogLevelInfo, "client connecting to server %s\n", client.serverAddress.String())
@@ -253,11 +281,9 @@ func (client *Client) Connect(connectTokenData []byte) {
 		printf(LogLevelInfo, "client connecting to server %s [%d/%d]\n", client.serverAddress.String(), client.serverAddressIndex+1, client.connectToken.numServerAddresses)
 	}
 
-	client.readPacketKey = client.connectToken.serverToClientKey
-	client.writePacketKey = client.connectToken.clientToServerKey
-	client.hasPacketKeys = true
-
 	client.resetBeforeNextConnect()
+
+	client.connectStartTime = client.time
 
 	client.setState(ClientStateSendingConnectionRequest)
 }
@@ -265,12 +291,16 @@ func (client *Client) Connect(connectTokenData []byte) {
 func (client *Client) processPacketInternal(from *Address, p packet, sequence uint64) {
 	switch t := p.(type) {
 	case *connectionDenied:
-		if (client.state == ClientStateSendingConnectionRequest ||
-			client.state == ClientStateSendingConnectionResponse) &&
-			from.Equal(client.serverAddress) {
+		if client.state == ClientStateSendingConnectionRequest && from.Equal(client.serverAddress) {
 			client.shouldDisconnect = true
 			client.shouldDisconnectState = ClientStateConnectionDenied
 			client.lastPacketReceiveTime = client.time
+		} else if client.state == ClientStateSendingConnectionResponse && from.Equal(client.serverAddress) {
+			if subtle.ConstantTimeCompare(t.serverNonce[:], client.serverNonce[:]) == 1 {
+				client.shouldDisconnect = true
+				client.shouldDisconnectState = ClientStateConnectionDenied
+				client.lastPacketReceiveTime = client.time
+			}
 		}
 
 	case *connectionChallenge:
@@ -284,6 +314,12 @@ func (client *Client) processPacketInternal(from *Address, p packet, sequence ui
 
 	case *connectionKeepAlive:
 		if from.Equal(client.serverAddress) {
+			maxClients := int(t.maxClients)
+			clientIndex := int(t.clientIndex)
+			if maxClients <= 0 || maxClients > MaxClients || clientIndex < 0 || clientIndex >= maxClients {
+				printf(LogLevelDebug, "ignored connection keep alive packet. client index or max clients out of range\n")
+				break
+			}
 			switch client.state {
 			case ClientStateConnected:
 				printf(LogLevelDebug, "client received connection keep alive packet from server\n")
@@ -291,8 +327,8 @@ func (client *Client) processPacketInternal(from *Address, p packet, sequence ui
 			case ClientStateSendingConnectionResponse:
 				printf(LogLevelDebug, "client received connection keep alive packet from server\n")
 				client.lastPacketReceiveTime = client.time
-				client.clientIndex = int(t.clientIndex)
-				client.maxClients = int(t.maxClients)
+				client.clientIndex = clientIndex
+				client.maxClients = maxClients
 				client.setState(ClientStateConnected)
 				printf(LogLevelInfo, "client connected to server\n")
 			}
@@ -320,25 +356,100 @@ func (client *Client) processPacketInternal(from *Address, p packet, sequence ui
 // ClientConfig.OverrideSendAndReceive to drive the client with your own
 // transport.
 func (client *Client) ProcessPacket(from *Address, packetData []byte) {
-	allowedPackets := [connectionNumPackets]bool{}
-	allowedPackets[connectionDeniedPacket] = true
-	allowedPackets[connectionChallengePacket] = true
-	allowedPackets[connectionKeepAlivePacket] = true
-	allowedPackets[connectionPayloadPacket] = true
-	allowedPackets[connectionDisconnectPacket] = true
+	// check the source address first, so a packet from any other address cannot advance replay protection
 
-	currentTimestamp := uint64(time.Now().Unix())
-
-	var readPacketKey []byte
-	if client.hasPacketKeys {
-		readPacketKey = client.readPacketKey[:]
+	if !from.Equal(client.serverAddress) {
+		return
 	}
+
+	if client.state <= ClientStateDisconnected {
+		return
+	}
+
+	allowedPackets := [connectionNumPackets]bool{}
+
+	currentTimestamp := nowUnix()
 
 	var sequence uint64
 
+	if client.state == ClientStateSendingConnectionRequest {
+		if len(packetData) < 1+1+serverNonceBytes+MacBytes {
+			return
+		}
+
+		prefixByte := packetData[0]
+		packetType := prefixByte & 0xF
+		sequenceBytes := int(prefixByte >> 4)
+
+		if packetType != connectionDeniedPacket && packetType != connectionChallengePacket {
+			return
+		}
+
+		if sequenceBytes < 1 || sequenceBytes > 8 {
+			return
+		}
+
+		if len(packetData) < 1+sequenceBytes+serverNonceBytes+MacBytes {
+			return
+		}
+
+		allowedPackets[connectionDeniedPacket] = true
+		allowedPackets[connectionChallengePacket] = true
+
+		var candidateServerNonce [serverNonceBytes]byte
+		copy(candidateServerNonce[:], packetData[1+sequenceBytes:1+sequenceBytes+serverNonceBytes])
+
+		candidateReadKey := derivePacketKey(client.connectToken.serverToClientKey, client.clientSalt, candidateServerNonce)
+
+		packet := readPacket(packetData,
+			&sequence,
+			candidateReadKey[:],
+			client.connectToken.protocolID,
+			currentTimestamp,
+			0,
+			nil,
+			&allowedPackets,
+			&client.replayProtection)
+
+		if packet == nil {
+			clear(candidateReadKey[:])
+			return
+		}
+
+		if packet.packetType() == connectionChallengePacket {
+			client.serverNonce = candidateServerNonce
+			client.hasServerNonce = true
+			client.readPacketKey = candidateReadKey
+			client.writePacketKey = derivePacketKey(client.connectToken.clientToServerKey, client.clientSalt, candidateServerNonce)
+		}
+
+		clear(candidateReadKey[:])
+
+		client.processPacketInternal(from, packet, sequence)
+		return
+	}
+
+	switch client.state {
+	case ClientStateSendingConnectionResponse:
+		allowedPackets[connectionDeniedPacket] = true
+		allowedPackets[connectionKeepAlivePacket] = true
+		allowedPackets[connectionPayloadPacket] = true
+		allowedPackets[connectionDisconnectPacket] = true
+	case ClientStateConnected:
+		allowedPackets[connectionKeepAlivePacket] = true
+		allowedPackets[connectionPayloadPacket] = true
+		allowedPackets[connectionDisconnectPacket] = true
+	default:
+		return
+	}
+
+	if !client.hasServerNonce {
+		return
+	}
+
 	packet := readPacket(packetData,
 		&sequence,
-		readPacketKey,
+		client.readPacketKey[:],
 		client.connectToken.protocolID,
 		currentTimestamp,
 		0,
@@ -442,6 +553,7 @@ func (client *Client) sendPackets() {
 			connectTokenExpireTimestamp: client.connectToken.expireTimestamp,
 			connectTokenNonce:           client.connectToken.nonce,
 			connectTokenData:            client.connectToken.privateData,
+			clientSalt:                  client.clientSalt,
 		}
 		client.sendPacketToServerInternal(packet)
 
@@ -470,13 +582,27 @@ func (client *Client) sendPackets() {
 	}
 }
 
+func (client *Client) canReachServerAddress(address *Address) bool {
+	if client.config.NetworkSimulator != nil || client.config.OverrideSendAndReceive {
+		return true
+	}
+	return client.socketHolder.hasSocketForAddress(address)
+}
+
 func (client *Client) connectToNextServer() bool {
-	if client.serverAddressIndex+1 >= client.connectToken.numServerAddresses {
+	nextIndex := -1
+	for i := client.serverAddressIndex + 1; i < client.connectToken.numServerAddresses; i++ {
+		if client.canReachServerAddress(&client.connectToken.serverAddresses[i]) {
+			nextIndex = i
+			break
+		}
+	}
+	if nextIndex < 0 {
 		printf(LogLevelDebug, "client has no more servers to connect to\n")
 		return false
 	}
 
-	client.serverAddressIndex++
+	client.serverAddressIndex = nextIndex
 	client.serverAddress = client.connectToken.serverAddresses[client.serverAddressIndex]
 
 	client.resetBeforeNextConnect()
@@ -492,6 +618,7 @@ func (client *Client) connectToNextServer() bool {
 // Update advances the client to the given time: it receives and processes
 // packets, sends outgoing packets, and applies timeouts. Call it regularly,
 // for example 60 times per second.
+// time must be monotonically non-decreasing across calls.
 func (client *Client) Update(time float64) {
 	client.time = time
 
@@ -514,7 +641,8 @@ func (client *Client) Update(time float64) {
 
 	if client.shouldDisconnect {
 		printf(LogLevelDebug, "client should disconnect -> %s\n", ClientStateName(client.shouldDisconnectState))
-		if client.connectToNextServer() {
+		// a connected client that the server disconnects goes to disconnected
+		if client.state != ClientStateConnected && client.connectToNextServer() {
 			return
 		}
 		client.disconnectInternal(client.shouldDisconnectState, false)
@@ -607,7 +735,7 @@ func (client *Client) disconnectInternal(destinationState int, sendDisconnectPac
 
 	printf(LogLevelInfo, "client disconnected\n")
 
-	if !client.loopback && sendDisconnectPackets && client.state > ClientStateDisconnected {
+	if !client.loopback && sendDisconnectPackets && client.state > ClientStateDisconnected && client.hasServerNonce {
 		printf(LogLevelDebug, "client sent disconnect packets to server\n")
 
 		for i := 0; i < numDisconnectPackets; i++ {
@@ -640,11 +768,15 @@ func (client *Client) MaxClients() int {
 // server in the same process without any packets going over the network. See
 // Server.ConnectLoopbackClient for the server side.
 func (client *Client) ConnectLoopback(clientIndex int, maxClients int) {
+	if client.config.SendLoopbackPacketCallback == nil {
+		return
+	}
+
 	printf(LogLevelInfo, "client connected to server via loopback as client %d\n", clientIndex)
-	client.state = ClientStateConnected
 	client.clientIndex = clientIndex
 	client.maxClients = maxClients
 	client.loopback = true
+	client.setState(ClientStateConnected)
 }
 
 // DisconnectLoopback disconnects a client in loopback mode.

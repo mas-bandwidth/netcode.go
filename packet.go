@@ -18,18 +18,23 @@ type packet interface {
 }
 
 // connectionRequest is the only unencrypted packet. It wraps the encrypted
-// private connect token data, which only the server can decrypt.
+// private connect token data, which only the server can decrypt, followed by
+// the 8-byte per-attempt clientSalt.
 type connectionRequest struct {
 	versionInfo                 [versionInfoBytes]byte
 	protocolID                  uint64
 	connectTokenExpireTimestamp uint64
 	connectTokenNonce           [connectTokenNonceBytes]byte
 	connectTokenData            [connectTokenPrivateBytes]byte
+	clientSalt                  [connectSaltBytes]byte
 }
 
-type connectionDenied struct{}
+type connectionDenied struct {
+	serverNonce [serverNonceBytes]byte
+}
 
 type connectionChallenge struct {
+	serverNonce            [serverNonceBytes]byte
 	challengeTokenSequence uint64
 	challengeTokenData     [challengeTokenBytes]byte
 }
@@ -72,16 +77,26 @@ func sequenceNumberBytesRequired(sequence uint64) int {
 	return 8 - i
 }
 
+const connectionRequestPacketBytes = 1 + versionInfoBytes + 8 + 8 + connectTokenNonceBytes + connectTokenPrivateBytes + connectSaltBytes
+
+// auditPacketNonce, when non-nil in tests, observes every (key, nonce) pair
+// encrypted by writePacket so tests can assert AEAD nonce uniqueness.
+var auditPacketNonce func(key [KeyBytes]byte, nonce [12]byte)
+
 // packetAdditionalData builds the associated data for encrypted packets:
-// version info, protocol id and the packet prefix byte. This stops an attacker
-// from modifying the packet type.
-func packetAdditionalData(protocolID uint64, prefixByte uint8) [versionInfoBytes + 8 + 1]byte {
-	var additional [versionInfoBytes + 8 + 1]byte
+// version info, protocol id, the packet prefix byte, and (for connection denied
+// and connection challenge packets) the 8-byte cleartext serverNonce. This stops
+// an attacker from modifying the packet type or cleartext serverNonce header.
+func packetAdditionalData(protocolID uint64, prefixByte uint8, hasServerNonce bool, serverNonce [serverNonceBytes]byte) ([versionInfoBytes + 8 + 1 + serverNonceBytes]byte, int) {
+	var additional [versionInfoBytes + 8 + 1 + serverNonceBytes]byte
 	w := writer{buffer: additional[:]}
 	w.bytes(versionInfo[:])
 	w.uint64(protocolID)
 	w.uint8(prefixByte)
-	return additional
+	if hasServerNonce {
+		w.bytes(serverNonce[:])
+	}
+	return additional, w.pos
 }
 
 // writePacket writes a packet to the buffer, encrypting all packet types
@@ -91,6 +106,10 @@ func writePacket(p packet, buffer []byte, sequence uint64, writePacketKey []byte
 	if request, ok := p.(*connectionRequest); ok {
 		// connection request packet: first byte is zero, not encrypted
 
+		if len(buffer) < connectionRequestPacketBytes {
+			return 0
+		}
+
 		w := writer{buffer: buffer}
 		w.uint8(connectionRequestPacket)
 		w.bytes(request.versionInfo[:])
@@ -98,6 +117,7 @@ func writePacket(p packet, buffer []byte, sequence uint64, writePacketKey []byte
 		w.uint64(request.connectTokenExpireTimestamp)
 		w.bytes(request.connectTokenNonce[:])
 		w.bytes(request.connectTokenData[:])
+		w.bytes(request.clientSalt[:])
 		return w.pos
 	}
 
@@ -119,6 +139,22 @@ func writePacket(p packet, buffer []byte, sequence uint64, writePacketKey []byte
 	for i := 0; i < sequenceBytes; i++ {
 		w.uint8(uint8(sequenceTemp & 0xFF))
 		sequenceTemp >>= 8
+	}
+
+	// packet types 1 (denied) and 2 (challenge) carry an 8-byte cleartext serverNonce header
+
+	var headerServerNonce [serverNonceBytes]byte
+	hasServerNonce := false
+
+	switch t := p.(type) {
+	case *connectionDenied:
+		headerServerNonce = t.serverNonce
+		hasServerNonce = true
+		w.bytes(t.serverNonce[:])
+	case *connectionChallenge:
+		headerServerNonce = t.serverNonce
+		hasServerNonce = true
+		w.bytes(t.serverNonce[:])
 	}
 
 	// write packet data according to type. this data will be encrypted.
@@ -153,13 +189,18 @@ func writePacket(p packet, buffer []byte, sequence uint64, writePacketKey []byte
 
 	encryptedFinish := w.pos
 
-	// encrypt the per-packet data written with the prefix byte, protocol id and version as the associated data. this must match to decrypt.
+	// encrypt the per-packet data written with the prefix byte, protocol id, version, and
+	// (for denied and challenge packets) serverNonce as the associated data. this must match to decrypt.
 
-	additional := packetAdditionalData(protocolID, prefixByte)
+	additional, additionalBytes := packetAdditionalData(protocolID, prefixByte, hasServerNonce, headerServerNonce)
 
 	nonce := packetNonce(sequence)
 
-	if err := encryptAEAD(buffer[encryptedStart:], encryptedFinish-encryptedStart, additional[:], nonce[:], writePacketKey); err != nil {
+	if auditPacketNonce != nil && len(writePacketKey) == KeyBytes {
+		auditPacketNonce([KeyBytes]byte(writePacketKey), nonce)
+	}
+
+	if err := encryptAEAD(buffer[encryptedStart:], encryptedFinish-encryptedStart, additional[:additionalBytes], nonce[:], writePacketKey); err != nil {
 		return 0
 	}
 
@@ -202,9 +243,9 @@ func readPacket(buffer []byte,
 			return nil
 		}
 
-		if bufferLength != 1+versionInfoBytes+8+8+connectTokenNonceBytes+connectTokenPrivateBytes {
+		if bufferLength != connectionRequestPacketBytes {
 			printf(LogLevelDebug, "ignored connection request packet. bad packet length (expected %d, got %d)\n",
-				1+versionInfoBytes+8+8+connectTokenNonceBytes+connectTokenPrivateBytes, bufferLength)
+				connectionRequestPacketBytes, bufferLength)
 			return nil
 		}
 
@@ -234,8 +275,12 @@ func readPacket(buffer []byte,
 
 		// a connect token that could have been issued before the server started is refused: its keys
 		// were already used to encrypt packets under sequence numbers that start again from zero.
+		// a token generated with a negative expireSeconds has expire timestamp ^uint64(0), so it
+		// passes this check on every restart for as long as the server keeps the same private key
+		// and protocol ID. it is for development and testing only, and its connect token history
+		// entry is never reused during a server run.
 
-		if packetConnectTokenExpireTimestamp < minConnectTokenExpireTimestamp {
+		if packetConnectTokenExpireTimestamp <= minConnectTokenExpireTimestamp {
 			printf(LogLevelDebug, "ignored connection request packet. connect token predates the server start\n")
 			return nil
 		}
@@ -243,7 +288,7 @@ func readPacket(buffer []byte,
 		var packetConnectTokenNonce [connectTokenNonceBytes]byte
 		r.bytes(packetConnectTokenNonce[:])
 
-		if decryptConnectTokenPrivate(buffer[r.pos:],
+		if decryptConnectTokenPrivate(buffer[r.pos:r.pos+connectTokenPrivateBytes],
 			protocolID,
 			packetConnectTokenExpireTimestamp,
 			packetConnectTokenNonce[:],
@@ -258,7 +303,10 @@ func readPacket(buffer []byte,
 			connectTokenExpireTimestamp: packetConnectTokenExpireTimestamp,
 			connectTokenNonce:           packetConnectTokenNonce,
 		}
+		privateTokenSlice := buffer[r.pos : r.pos+connectTokenPrivateBytes]
 		r.bytes(request.connectTokenData[:])
+		clear(privateTokenSlice)
+		r.bytes(request.clientSalt[:])
 
 		return request
 	}
@@ -296,7 +344,12 @@ func readPacket(buffer []byte,
 		return nil
 	}
 
-	if bufferLength < 1+sequenceBytes+MacBytes {
+	headerNonceBytes := 0
+	if packetType == connectionDeniedPacket || packetType == connectionChallengePacket {
+		headerNonceBytes = serverNonceBytes
+	}
+
+	if bufferLength < 1+sequenceBytes+headerNonceBytes+MacBytes {
 		printf(LogLevelDebug, "ignored encrypted packet. buffer is too small for sequence bytes + encryption mac\n")
 		return nil
 	}
@@ -308,6 +361,14 @@ func readPacket(buffer []byte,
 		*sequence |= uint64(value) << (8 * i)
 	}
 
+	// the empty-slot marker is not a valid packet sequence. reject it before the
+	// replay protection check so it can never be accepted.
+
+	if *sequence == replayEmpty {
+		printf(LogLevelDebug, "ignored encrypted packet. sequence is invalid\n")
+		return nil
+	}
+
 	// ignore the packet if it has already been received
 
 	if replayProtection != nil && packetType >= connectionKeepAlivePacket {
@@ -317,9 +378,14 @@ func readPacket(buffer []byte,
 		}
 	}
 
+	var headerServerNonce [serverNonceBytes]byte
+	if headerNonceBytes > 0 {
+		r.bytes(headerServerNonce[:])
+	}
+
 	// decrypt the per-packet type data
 
-	additional := packetAdditionalData(protocolID, prefixByte)
+	additional, additionalBytes := packetAdditionalData(protocolID, prefixByte, headerNonceBytes > 0, headerServerNonce)
 
 	nonce := packetNonce(*sequence)
 
@@ -330,7 +396,7 @@ func readPacket(buffer []byte,
 		return nil
 	}
 
-	if decryptAEAD(buffer[r.pos:], encryptedBytes, additional[:], nonce[:], readPacketKey) != nil {
+	if decryptAEAD(buffer[r.pos:], encryptedBytes, additional[:additionalBytes], nonce[:], readPacketKey) != nil {
 		printf(LogLevelDebug, "ignored encrypted packet. failed to decrypt\n")
 		return nil
 	}
@@ -351,14 +417,14 @@ func readPacket(buffer []byte,
 			printf(LogLevelDebug, "ignored connection denied packet. decrypted packet data is wrong size\n")
 			return nil
 		}
-		return &connectionDenied{}
+		return &connectionDenied{serverNonce: headerServerNonce}
 
 	case connectionChallengePacket:
 		if decryptedBytes != 8+challengeTokenBytes {
 			printf(LogLevelDebug, "ignored connection challenge packet. decrypted packet data is wrong size\n")
 			return nil
 		}
-		challenge := &connectionChallenge{}
+		challenge := &connectionChallenge{serverNonce: headerServerNonce}
 		challenge.challengeTokenSequence = r.uint64()
 		r.bytes(challenge.challengeTokenData[:])
 		return challenge

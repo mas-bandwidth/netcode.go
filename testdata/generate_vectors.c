@@ -51,6 +51,8 @@ static void fixture_challenge_key( uint8_t * key )        { fixture_pattern( key
 static void fixture_client_to_server_key( uint8_t * key ) { fixture_pattern( key, NETCODE_KEY_BYTES, 3, 1 ); }
 static void fixture_server_to_client_key( uint8_t * key ) { fixture_pattern( key, NETCODE_KEY_BYTES, 5, 2 ); }
 static void fixture_connect_token_nonce( uint8_t * nonce ) { fixture_pattern( nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES, 17, 9 ); }
+static void fixture_client_salt( uint8_t * salt )         { fixture_pattern( salt, NETCODE_CONNECT_SALT_BYTES, 19, 21 ); }
+static void fixture_server_nonce( uint8_t * nonce )       { fixture_pattern( nonce, NETCODE_SERVER_NONCE_BYTES, 23, 29 ); }
 
 static void fixture_server_addresses( struct netcode_address_t * addresses )
 {
@@ -208,26 +210,32 @@ int main( int argc, char ** argv )
 
     {
         struct netcode_connection_request_packet_t packet;
+        memset( &packet, 0, sizeof( packet ) );
         packet.packet_type = NETCODE_CONNECTION_REQUEST_PACKET;
         memcpy( packet.version_info, NETCODE_VERSION_INFO, NETCODE_VERSION_INFO_BYTES );
         packet.protocol_id = FIXTURE_PROTOCOL_ID;
         packet.connect_token_expire_timestamp = FIXTURE_EXPIRE_TIMESTAMP;
         memcpy( packet.connect_token_nonce, connect_token_nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES );
         memcpy( packet.connect_token_data, encrypted_connect_token_private_data, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
+        fixture_client_salt( packet.client_salt );
         bytes_written = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, FIXTURE_PROTOCOL_ID );
         write_vector( "packet_connection_request.bin", buffer, bytes_written );
     }
 
     {
         struct netcode_connection_denied_packet_t packet;
+        memset( &packet, 0, sizeof( packet ) );
         packet.packet_type = NETCODE_CONNECTION_DENIED_PACKET;
+        fixture_server_nonce( packet.server_nonce );
         bytes_written = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0x11ULL, packet_key, FIXTURE_PROTOCOL_ID );
         write_vector( "packet_connection_denied.bin", buffer, bytes_written );
     }
 
     {
         struct netcode_connection_challenge_packet_t packet;
+        memset( &packet, 0, sizeof( packet ) );
         packet.packet_type = NETCODE_CONNECTION_CHALLENGE_PACKET;
+        fixture_server_nonce( packet.server_nonce );
         packet.challenge_token_sequence = FIXTURE_CHALLENGE_SEQUENCE;
         memcpy( packet.challenge_token_data, encrypted_challenge_token_data, NETCODE_CHALLENGE_TOKEN_BYTES );
         bytes_written = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0x2233ULL, packet_key, FIXTURE_PROTOCOL_ID );

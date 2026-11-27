@@ -94,6 +94,7 @@ func ParseAddress(addressString string) (Address, error) {
 	s := addressString
 
 	if strings.HasPrefix(s, "[") {
+		portStripped := false
 		baseIndex := len(s) - 1
 		// note: no need to search past 6 characters as ":65535" is longest possible port value
 		for i := 0; i < 6; i++ {
@@ -108,18 +109,25 @@ func ParseAddress(addressString string) (Address, error) {
 				}
 				address.Port = port
 				s = s[:index-1]
+				portStripped = true
 				break
 			}
 		}
 
 		// if a port is omitted, strip the trailing ']' so "[addr]" parses as just the address
 
-		s = strings.TrimSuffix(s, "]")
+		if !portStripped {
+			s = strings.TrimSuffix(s, "]")
+		}
 
 		s = s[1:]
+
+		if strings.ContainsAny(s, "[]") {
+			return Address{}, fmt.Errorf("netcode: failed to parse address %q", addressString)
+		}
 	}
 
-	if addr, err := netip.ParseAddr(s); err == nil && addr.Is6() {
+	if addr, err := netip.ParseAddr(s); err == nil && addr.Is6() && addr.Zone() == "" {
 		// don't unmap 4-in-6 addresses here: "::ffff:a.b.c.d" parses as IPv6,
 		// matching inet_pton in the C implementation
 		address.Type = AddressIPv6
