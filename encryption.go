@@ -2,11 +2,11 @@ package netcode
 
 const maxEncryptionMappings = MaxClients * 4
 
-// encryptionManager maps packet source addresses to the send and receive keys
-// from the private connect token, so the server can decrypt packets from
-// clients that are mid-handshake or connected. Mappings expire after timeout
-// seconds without being touched, or at an absolute expire time while the
-// client has not yet established a connection.
+// encryptionManager maps packet source addresses to the per-connection derived
+// send and receive keys, clientSalt, and serverNonce so the server can decrypt
+// packets from clients that are mid-handshake or connected. Mappings expire
+// after timeout seconds without being touched, or at an absolute expire time
+// while the client has not yet established a connection.
 type encryptionManager struct {
 	numEncryptionMappings  int
 	timeout                [maxEncryptionMappings]int32
@@ -15,6 +15,9 @@ type encryptionManager struct {
 	address                [maxEncryptionMappings]Address
 	clientIndex            [maxEncryptionMappings]int
 	connectTokenEntryIndex [maxEncryptionMappings]int
+	connectTokenMac        [maxEncryptionMappings][MacBytes]byte
+	clientSalt             [maxEncryptionMappings][connectSaltBytes]byte
+	serverNonce            [maxEncryptionMappings][serverNonceBytes]byte
 	sendKey                [maxEncryptionMappings][KeyBytes]byte
 	receiveKey             [maxEncryptionMappings][KeyBytes]byte
 }
@@ -27,6 +30,9 @@ func (m *encryptionManager) reset() {
 	for i := 0; i < maxEncryptionMappings; i++ {
 		m.clientIndex[i] = -1
 		m.connectTokenEntryIndex[i] = -1
+		m.connectTokenMac[i] = [MacBytes]byte{}
+		m.clientSalt[i] = [connectSaltBytes]byte{}
+		m.serverNonce[i] = [serverNonceBytes]byte{}
 		m.expireTime[i] = -1.0
 		m.lastAccessTime[i] = -1000.0
 		m.address[i] = Address{}
@@ -41,13 +47,18 @@ func (m *encryptionManager) entryExpired(index int, time float64) bool {
 		(m.expireTime[index] >= 0.0 && m.expireTime[index] < time)
 }
 
-func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, receiveKey []byte, time, expireTime float64, timeout int32, connectTokenEntryIndex int) bool {
+func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, receiveKey []byte, time, expireTime float64, timeout int32, connectTokenEntryIndex int, tokenMac ...[]byte) bool {
+	m.clearExpiredKeys(time)
+
 	for i := 0; i < m.numEncryptionMappings; i++ {
 		if m.address[i].Equal(*address) && !m.entryExpired(i, time) {
 			m.timeout[i] = timeout
 			m.expireTime[i] = expireTime
 			m.lastAccessTime[i] = time
 			m.connectTokenEntryIndex[i] = connectTokenEntryIndex
+			m.setConnectTokenMac(i, tokenMac)
+			m.clientSalt[i] = [connectSaltBytes]byte{}
+			m.serverNonce[i] = [serverNonceBytes]byte{}
 			copy(m.sendKey[i][:], sendKey)
 			copy(m.receiveKey[i][:], receiveKey)
 			return true
@@ -62,6 +73,9 @@ func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, rece
 			m.expireTime[i] = expireTime
 			m.lastAccessTime[i] = time
 			m.connectTokenEntryIndex[i] = connectTokenEntryIndex
+			m.setConnectTokenMac(i, tokenMac)
+			m.clientSalt[i] = [connectSaltBytes]byte{}
+			m.serverNonce[i] = [serverNonceBytes]byte{}
 			copy(m.sendKey[i][:], sendKey)
 			copy(m.receiveKey[i][:], receiveKey)
 			if i+1 > m.numEncryptionMappings {
@@ -74,12 +88,23 @@ func (m *encryptionManager) addEncryptionMapping(address *Address, sendKey, rece
 	return false
 }
 
+func (m *encryptionManager) setConnectTokenMac(index int, tokenMac [][]byte) {
+	if len(tokenMac) > 0 && len(tokenMac[0]) == MacBytes {
+		copy(m.connectTokenMac[index][:], tokenMac[0])
+	} else {
+		m.connectTokenMac[index] = [MacBytes]byte{}
+	}
+}
+
 func (m *encryptionManager) removeEncryptionMapping(address *Address, time float64) bool {
 	for i := 0; i < m.numEncryptionMappings; i++ {
 		if m.address[i].Equal(*address) {
 			m.expireTime[i] = -1.0
 			m.lastAccessTime[i] = -1000.0
 			m.connectTokenEntryIndex[i] = -1
+			m.connectTokenMac[i] = [MacBytes]byte{}
+			m.clientSalt[i] = [connectSaltBytes]byte{}
+			m.serverNonce[i] = [serverNonceBytes]byte{}
 			m.address[i] = Address{}
 			m.sendKey[i] = [KeyBytes]byte{}
 			m.receiveKey[i] = [KeyBytes]byte{}
@@ -91,6 +116,11 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 						break
 					}
 					m.address[index].Type = AddressNone
+					m.connectTokenMac[index] = [MacBytes]byte{}
+					m.clientSalt[index] = [connectSaltBytes]byte{}
+					m.serverNonce[index] = [serverNonceBytes]byte{}
+					m.sendKey[index] = [KeyBytes]byte{}
+					m.receiveKey[index] = [KeyBytes]byte{}
 					index--
 				}
 				m.numEncryptionMappings = index + 1
@@ -101,6 +131,18 @@ func (m *encryptionManager) removeEncryptionMapping(address *Address, time float
 	}
 
 	return false
+}
+
+// clearExpiredKeys zeros the keys of every expired mapping that no client owns.
+func (m *encryptionManager) clearExpiredKeys(time float64) {
+	for i := 0; i < m.numEncryptionMappings; i++ {
+		if m.clientIndex[i] == -1 && m.entryExpired(i, time) {
+			m.clientSalt[i] = [connectSaltBytes]byte{}
+			m.serverNonce[i] = [serverNonceBytes]byte{}
+			m.sendKey[i] = [KeyBytes]byte{}
+			m.receiveKey[i] = [KeyBytes]byte{}
+		}
+	}
 }
 
 func (m *encryptionManager) findEncryptionMapping(address *Address, time float64) int {
@@ -151,4 +193,18 @@ func (m *encryptionManager) getConnectTokenEntryIndex(index int) int {
 		return -1
 	}
 	return m.connectTokenEntryIndex[index]
+}
+
+func (m *encryptionManager) getConnectTokenMac(index int) []byte {
+	if index == -1 {
+		return nil
+	}
+	return m.connectTokenMac[index][:]
+}
+
+func (m *encryptionManager) getServerNonce(index int) ([serverNonceBytes]byte, bool) {
+	if index < 0 || index >= m.numEncryptionMappings {
+		return [serverNonceBytes]byte{}, false
+	}
+	return m.serverNonce[index], true
 }

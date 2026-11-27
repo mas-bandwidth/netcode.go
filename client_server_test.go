@@ -3,7 +3,11 @@ package netcode
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"net"
+	"runtime"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -31,12 +35,79 @@ func newLossySimulator() *NetworkSimulator {
 	return simulator
 }
 
+func TestClientCreateDualRequiresOverrideCallbacks(t *testing.T) {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false }
+
+	cases := []*ClientConfig{
+		{OverrideSendAndReceive: true},
+		{OverrideSendAndReceive: true, ReceivePacketOverride: receive},
+		{OverrideSendAndReceive: true, SendPacketOverride: send},
+	}
+
+	for _, c := range cases {
+		client, err := NewClientDual("0.0.0.0:0", "[::]:0", c, 0.0)
+		check(t, client == nil)
+		check(t, errors.Is(err, ErrClientOverrideCallbacksRequired))
+	}
+
+	// both callbacks supplied creates successfully
+
+	client, err := NewClientDual("0.0.0.0:0", "[::]:0", &ClientConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     send,
+		ReceivePacketOverride:  receive,
+	}, 0.0)
+	check(t, err == nil)
+	check(t, client != nil)
+	client.Close()
+}
+
+func TestServerCreateDualRequiresOverrideCallbacks(t *testing.T) {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false }
+
+	cases := []*ServerConfig{
+		{OverrideSendAndReceive: true},
+		{OverrideSendAndReceive: true, ReceivePacketOverride: receive},
+		{OverrideSendAndReceive: true, SendPacketOverride: send},
+	}
+
+	for _, c := range cases {
+		server, err := NewServerDual("127.0.0.1:0", "[::1]:0", c, 0.0)
+		check(t, server == nil)
+		check(t, errors.Is(err, ErrServerOverrideCallbacksRequired))
+	}
+
+	// both callbacks supplied creates successfully
+
+	server, err := NewServerDual("127.0.0.1:0", "[::1]:0", &ServerConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     send,
+		ReceivePacketOverride:  receive,
+	}, 0.0)
+	check(t, err == nil)
+	check(t, server != nil)
+	server.Close()
+}
+
 func generateTestConnectToken(t *testing.T, serverAddress string, expireSeconds int, timeoutSeconds int, clientID uint64) []byte {
 	t.Helper()
 	connectToken, err := GenerateConnectToken([]string{serverAddress}, []string{serverAddress},
 		expireSeconds, timeoutSeconds, clientID, testProtocolID, testPrivateKey[:], randomUserData())
 	check(t, err == nil)
 	return connectToken
+}
+
+// startServerOneSecondEarlier starts the server as if one second ago, so a connect
+// token issued now with the full maximum lifetime expires after the server's start
+// floor. A token issued in the same second the server starts is refused.
+func startServerOneSecondEarlier(server *Server, maxClients int) {
+	previousNowUnix := nowUnix
+	startTimestamp := previousNowUnix() - 1
+	nowUnix = func() uint64 { return startTimestamp }
+	server.Start(maxClients)
+	nowUnix = previousNowUnix
 }
 
 // pumpUntilConnected runs the standard connect loop: update the simulator,
@@ -83,7 +154,7 @@ func TestClientServerConnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -170,7 +241,7 @@ func clientServerSocketConnectTo(t *testing.T, clientAddress, clientAddress2, se
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, connectAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -208,6 +279,7 @@ func clientServerSocketConnect(t *testing.T, clientAddress, clientAddress2, serv
 }
 
 func TestClientServerIPv4SocketConnect(t *testing.T) {
+	requireFunctional(t)
 	clientServerSocketConnect(t, "0.0.0.0:50000", "", "127.0.0.1:40000", "")
 	clientServerSocketConnect(t, "0.0.0.0:50000", "", "127.0.0.1:40000", "[::1]:40000")
 	clientServerSocketConnect(t, "0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "")
@@ -215,6 +287,7 @@ func TestClientServerIPv4SocketConnect(t *testing.T) {
 }
 
 func TestClientServerIPv6SocketConnect(t *testing.T) {
+	requireFunctional(t)
 	clientServerSocketConnect(t, "[::]:50000", "", "[::1]:40000", "")
 	clientServerSocketConnect(t, "[::]:50000", "", "[::1]:40000", "127.0.0.1:40000")
 	clientServerSocketConnect(t, "0.0.0.0:50000", "[::]:50000", "[::1]:40000", "")
@@ -222,6 +295,7 @@ func TestClientServerIPv6SocketConnect(t *testing.T) {
 }
 
 func TestClientServerDualSocketConnect(t *testing.T) {
+	requireFunctional(t)
 	// dual stack client connects to dual stack server over ipv4
 
 	clientServerSocketConnect(t, "0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000")
@@ -261,7 +335,7 @@ func TestClientServerKeepAlive(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -319,7 +393,7 @@ func TestClientServerMultipleClients(t *testing.T) {
 	for i := 0; i < len(maxClients); i++ {
 		// start the server with max # of clients for this iteration
 
-		server.Start(maxClients[i])
+		startServerOneSecondEarlier(server, maxClients[i])
 
 		// create # of client objects for this iteration and connect to server
 
@@ -487,7 +561,7 @@ func TestClientServerMultipleServers(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// the first two server addresses are unreachable. the client works through them
 	// and connects to the third.
@@ -495,7 +569,7 @@ func TestClientServerMultipleServers(t *testing.T) {
 	serverAddresses := []string{"10.10.10.10:1000", "100.100.100.100:50000", "[::1]:40000"}
 
 	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
-		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+		60, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
 	check(t, err == nil)
 
 	client.Connect(connectToken)
@@ -562,6 +636,35 @@ func TestClientServerMultipleServers(t *testing.T) {
 	check(t, clientNumPacketsReceived >= 10 && serverNumPacketsReceived >= 10)
 }
 
+func TestClientConnectTokenExpiredMultipleServers(t *testing.T) {
+	simulator := newLossySimulator()
+
+	currentTime := 0.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+
+	client, err := NewClient("[::]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	serverAddresses := []string{"10.10.10.10:1000", "100.100.100.100:50000"}
+
+	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
+		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+	check(t, err == nil)
+
+	client.Connect(connectToken)
+
+	for client.State() > ClientStateDisconnected {
+		simulator.Update(currentTime)
+		client.Update(currentTime)
+		currentTime += deltaTime
+	}
+
+	check(t, client.State() == ClientStateConnectTokenExpired)
+}
+
 func TestClientErrorConnectTokenExpired(t *testing.T) {
 	simulator := newLossySimulator()
 
@@ -599,6 +702,105 @@ func TestClientErrorInvalidConnectToken(t *testing.T) {
 	check(t, client.State() == ClientStateInvalidConnectToken)
 }
 
+func TestClientServerAddressFamilySelection(t *testing.T) {
+	const clientTime = 1000.0
+	const createTimestamp = uint64(clientTime)
+	const expireTimestamp = createTimestamp + uint64(testConnectTokenExpiry)
+
+	newSingleFamilyClient := func(ipv4, ipv6 bool) *Client {
+		client, err := NewClient("127.0.0.1:50000", &ClientConfig{
+			OverrideSendAndReceive: true,
+			SendPacketOverride:     func(to *Address, packetData []byte) {},
+			ReceivePacketOverride:  func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false },
+		}, clientTime)
+		check(t, err == nil)
+		client.config.OverrideSendAndReceive = false
+		if ipv4 {
+			client.socketHolder.ipv4 = &socket{}
+		}
+		if ipv6 {
+			client.socketHolder.ipv6 = &socket{}
+		}
+		return client
+	}
+
+	newConnectToken := func(serverAddresses []string, timeoutSeconds int) []byte {
+		addresses := make([]Address, len(serverAddresses))
+		for i, serverAddress := range serverAddresses {
+			address, err := ParseAddress(serverAddress)
+			check(t, err == nil)
+			addresses[i] = address
+		}
+
+		tokenPrivate := generateConnectTokenPrivate(randomUint64(), int32(timeoutSeconds), addresses, nil)
+		var privateData [connectTokenPrivateBytes]byte
+		tokenPrivate.write(privateData[:])
+
+		var nonce [connectTokenNonceBytes]byte
+		check(t, encryptConnectTokenPrivate(privateData[:], testProtocolID, expireTimestamp, nonce[:], testPrivateKey[:]) == nil)
+
+		token := connectToken{
+			protocolID:         testProtocolID,
+			createTimestamp:    createTimestamp,
+			expireTimestamp:    expireTimestamp,
+			nonce:              nonce,
+			privateData:        privateData,
+			timeoutSeconds:     int32(timeoutSeconds),
+			numServerAddresses: len(addresses),
+			clientToServerKey:  tokenPrivate.clientToServerKey,
+			serverToClientKey:  tokenPrivate.serverToClientKey,
+		}
+		copy(token.serverAddresses[:], addresses)
+
+		buffer := make([]byte, ConnectTokenBytes)
+		token.write(buffer)
+		return buffer
+	}
+
+	{
+		client := newSingleFamilyClient(true, false)
+		token := newConnectToken([]string{"[::1]:40000"}, testTimeoutSeconds)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateInvalidConnectToken)
+	}
+
+	{
+		client := newSingleFamilyClient(false, true)
+		token := newConnectToken([]string{"127.0.0.1:40000"}, testTimeoutSeconds)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateInvalidConnectToken)
+	}
+
+	{
+		client := newSingleFamilyClient(true, false)
+		token := newConnectToken([]string{"[::1]:40000", "127.0.0.1:40001"}, testTimeoutSeconds)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateSendingConnectionRequest)
+		check(t, client.serverAddressIndex == 1)
+		check(t, client.serverAddress.String() == "127.0.0.1:40001")
+	}
+
+	{
+		client := newSingleFamilyClient(true, false)
+		token := newConnectToken([]string{"127.0.0.1:40000", "[::1]:40001", "127.0.0.1:40002", "[::1]:40003"}, 1)
+
+		client.Connect(token)
+		check(t, client.State() == ClientStateSendingConnectionRequest)
+		check(t, client.serverAddressIndex == 0)
+		check(t, client.serverAddress.String() == "127.0.0.1:40000")
+
+		check(t, client.connectToNextServer())
+		check(t, client.State() == ClientStateSendingConnectionRequest)
+		check(t, client.serverAddressIndex == 2)
+		check(t, client.serverAddress.String() == "127.0.0.1:40002")
+
+		check(t, !client.connectToNextServer())
+	}
+}
+
 func TestClientErrorConnectionTimedOut(t *testing.T) {
 	simulator := newLossySimulator()
 
@@ -623,7 +825,7 @@ func TestClientErrorConnectionTimedOut(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -677,7 +879,7 @@ func TestClientErrorConnectionResponseTimeout(t *testing.T) {
 
 	server.flags = serverFlagIgnoreConnectionResponsePackets
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -712,7 +914,7 @@ func TestClientErrorConnectionRequestTimeout(t *testing.T) {
 
 	server.flags = serverFlagIgnoreConnectionRequestPackets
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -747,7 +949,7 @@ func TestClientErrorConnectionDenied(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -820,7 +1022,7 @@ func TestClientSideDisconnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -880,7 +1082,7 @@ func TestServerSideDisconnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -917,6 +1119,341 @@ func TestServerSideDisconnect(t *testing.T) {
 	check(t, server.ClientDisconnectReason(0) == DisconnectReasonServerDisconnect)
 }
 
+func TestServerSideDisconnectWithMoreServerAddresses(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 0.0
+	deltaTime := 1.0 / 10.0
+
+	// a connected client that the server disconnects goes to disconnected, and does
+	// not move on to the next server address in its connect token
+
+	var transitions [][2]int
+	clientConfig := &ClientConfig{
+		NetworkSimulator: simulator,
+		StateChangeCallback: func(previousState int, currentState int) {
+			transitions = append(transitions, [2]int{previousState, currentState})
+		},
+	}
+
+	client, err := NewClient("[::]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+	}
+
+	server, err := NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	startServerOneSecondEarlier(server, 1)
+
+	serverAddresses := []string{"[::1]:40000", "[::1]:40001"}
+
+	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
+		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+	check(t, err == nil)
+
+	client.Connect(connectToken)
+
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+
+	check(t, client.State() == ClientStateConnected)
+
+	transitions = nil
+
+	server.DisconnectClient(0)
+
+	for i := 0; i < 10; i++ {
+		simulator.Update(currentTime)
+
+		client.Update(currentTime)
+
+		server.Update(currentTime)
+
+		currentTime += deltaTime
+	}
+
+	check(t, client.State() == ClientStateDisconnected)
+	if len(transitions) != 1 || transitions[0] != [2]int{ClientStateConnected, ClientStateDisconnected} {
+		t.Fatalf("expected one transition from connected to disconnected, got %v", transitions)
+	}
+}
+
+func TestDisconnectCallbackCanStopServer(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 1000.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+
+	client, err := NewClient("[::]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	var server *Server
+	callbackCalls := 0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+		ConnectDisconnectCallback: func(clientIndex int, connected bool) {
+			if connected {
+				return
+			}
+			callbackCalls++
+			if callbackCalls == 1 {
+				server.Stop()
+			}
+		},
+	}
+
+	server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	startServerOneSecondEarlier(server, 1)
+
+	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+
+	client.Connect(connectToken)
+
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+
+	check(t, client.State() == ClientStateConnected)
+	check(t, server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 1)
+
+	server.DisconnectClient(0)
+
+	check(t, callbackCalls == 1)
+	check(t, !server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 0)
+	check(t, !server.Running())
+}
+
+func TestDisconnectCallbackCanDisconnectClient(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 1000.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+
+	client, err := NewClient("[::]:50000", clientConfig, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	var server *Server
+	callbackCalls := 0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+		ConnectDisconnectCallback: func(clientIndex int, connected bool) {
+			if connected {
+				return
+			}
+			callbackCalls++
+			if callbackCalls == 1 {
+				server.DisconnectClient(clientIndex)
+			}
+		},
+	}
+
+	server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	startServerOneSecondEarlier(server, 1)
+
+	connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+
+	client.Connect(connectToken)
+
+	pumpUntilConnected(simulator, client, server, &currentTime, deltaTime)
+
+	check(t, client.State() == ClientStateConnected)
+	check(t, server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 1)
+
+	server.DisconnectClient(0)
+
+	check(t, callbackCalls == 1)
+	check(t, !server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 0)
+	check(t, server.Running())
+}
+
+func TestDisconnectCallbackCanDisconnectAllClients(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 1000.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+
+	clients := make([]*Client, 2)
+	for i := range clients {
+		client, err := NewClient(fmt.Sprintf("[::]:%d", 50000+i), clientConfig, currentTime)
+		check(t, err == nil)
+		clients[i] = client
+		defer client.Close()
+	}
+
+	var server *Server
+	callbackCalls := 0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+		ConnectDisconnectCallback: func(clientIndex int, connected bool) {
+			if connected {
+				return
+			}
+			callbackCalls++
+			if callbackCalls == 1 {
+				server.DisconnectAllClients()
+			}
+		},
+	}
+
+	var err error
+	server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	startServerOneSecondEarlier(server, len(clients))
+
+	for i := range clients {
+		connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+		clients[i].Connect(connectToken)
+	}
+
+	for i := 0; i < 1000; i++ {
+		simulator.Update(currentTime)
+
+		for _, client := range clients {
+			client.Update(currentTime)
+		}
+
+		server.Update(currentTime)
+
+		if clients[0].State() == ClientStateConnected && clients[1].State() == ClientStateConnected && server.NumConnectedClients() == len(clients) {
+			break
+		}
+
+		currentTime += deltaTime
+	}
+
+	for i := range clients {
+		check(t, clients[i].State() == ClientStateConnected)
+		check(t, server.ClientConnected(i))
+	}
+	check(t, server.NumConnectedClients() == len(clients))
+
+	server.DisconnectClient(0)
+
+	check(t, callbackCalls == len(clients))
+	for i := range clients {
+		check(t, !server.ClientConnected(i))
+	}
+	check(t, server.NumConnectedClients() == 0)
+	check(t, server.Running())
+}
+
+func TestDisconnectCallbackCanStopServerWithMultipleClients(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 1000.0
+	deltaTime := 1.0 / 10.0
+
+	clientConfig := &ClientConfig{NetworkSimulator: simulator}
+
+	clients := make([]*Client, 3)
+	for i := range clients {
+		client, err := NewClient(fmt.Sprintf("[::]:%d", 50000+i), clientConfig, currentTime)
+		check(t, err == nil)
+		clients[i] = client
+		defer client.Close()
+	}
+
+	var server *Server
+	callbackCalls := 0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+		ConnectDisconnectCallback: func(clientIndex int, connected bool) {
+			if connected {
+				return
+			}
+			callbackCalls++
+			if callbackCalls == 1 {
+				server.Stop()
+			}
+		},
+	}
+
+	var err error
+	server, err = NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	startServerOneSecondEarlier(server, len(clients))
+
+	for i := range clients {
+		connectToken := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+		clients[i].Connect(connectToken)
+	}
+
+	for i := 0; i < 1000; i++ {
+		simulator.Update(currentTime)
+
+		for _, client := range clients {
+			client.Update(currentTime)
+		}
+
+		server.Update(currentTime)
+
+		allConnected := true
+		for _, client := range clients {
+			if client.State() != ClientStateConnected {
+				allConnected = false
+			}
+		}
+		if allConnected && server.NumConnectedClients() == len(clients) {
+			break
+		}
+
+		currentTime += deltaTime
+	}
+
+	for i := range clients {
+		check(t, clients[i].State() == ClientStateConnected)
+		check(t, server.ClientConnected(i))
+	}
+	check(t, server.NumConnectedClients() == len(clients))
+
+	server.DisconnectClient(0)
+
+	check(t, callbackCalls == len(clients))
+	for i := range clients {
+		check(t, !server.ClientConnected(i))
+	}
+	check(t, server.NumConnectedClients() == 0)
+	check(t, !server.Running())
+}
+
 func TestServerClientDisconnectReason(t *testing.T) {
 	simulator := NewNetworkSimulator()
 
@@ -941,7 +1478,7 @@ func TestServerClientDisconnectReason(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// no disconnect has happened yet, so the client slot reason is none
 
@@ -1024,7 +1561,7 @@ func TestClientReconnect(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	clientID := randomUint64()
 
@@ -1101,7 +1638,7 @@ func TestDisableTimeout(t *testing.T) {
 	check(t, err == nil)
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
 	// negative timeout disables the timeout entirely (dev only)
 
@@ -1171,6 +1708,44 @@ func TestDisableTimeout(t *testing.T) {
 	check(t, clientNumPacketsReceived >= 10 && serverNumPacketsReceived >= 10)
 }
 
+func TestLoopbackStateChangeCallback(t *testing.T) {
+	type stateChange struct {
+		previousState int
+		currentState  int
+	}
+
+	var stateChanges []stateChange
+
+	client := &Client{
+		config: ClientConfig{
+			StateChangeCallback: func(previousState int, currentState int) {
+				stateChanges = append(stateChanges, stateChange{previousState, currentState})
+			},
+			SendLoopbackPacketCallback: func(clientIndex int, packetData []byte, packetSequence uint64) {},
+		},
+		time:                  1000.0,
+		state:                 ClientStateDisconnected,
+		shouldDisconnectState: ClientStateDisconnected,
+	}
+
+	client.ConnectLoopback(0, 2)
+
+	check(t, len(stateChanges) == 1)
+	check(t, stateChanges[0].previousState == ClientStateDisconnected)
+	check(t, stateChanges[0].currentState == ClientStateConnected)
+	check(t, client.State() == ClientStateConnected)
+	check(t, client.Loopback())
+	check(t, client.Index() == 0)
+	check(t, client.MaxClients() == 2)
+
+	client.DisconnectLoopback()
+
+	check(t, len(stateChanges) == 2)
+	check(t, stateChanges[1].previousState == ClientStateConnected)
+	check(t, stateChanges[1].currentState == ClientStateDisconnected)
+	check(t, client.State() == ClientStateDisconnected)
+}
+
 type testLoopbackContext struct {
 	client                         *Client
 	server                         *Server
@@ -1211,7 +1786,7 @@ func TestLoopback(t *testing.T) {
 
 	maxClients := 2
 
-	server.Start(maxClients)
+	startServerOneSecondEarlier(server, maxClients)
 
 	context.server = server
 
@@ -1413,13 +1988,161 @@ func TestLoopback(t *testing.T) {
 	check(t, server.ClientLoopback(0))
 }
 
-// TestPacketTagging must run last: packet tagging is enabled process-wide and
-// stays on for any sockets created afterwards, exactly as in the C library.
+func TestClientServerSocketReceiveBurst(t *testing.T) {
+	requireFunctional(t)
+	currentTime := 0.0
+	deltaTime := 1.0 / 10.0
+	serverAddress := "127.0.0.1:40000"
+
+	client, err := NewClient("127.0.0.1:50000", nil, currentTime)
+	check(t, err == nil)
+	defer client.Close()
+
+	serverConfig := &ServerConfig{
+		ProtocolID: testProtocolID,
+		PrivateKey: testPrivateKey,
+	}
+
+	server, err := NewServer(serverAddress, serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	startServerOneSecondEarlier(server, 1)
+
+	connectToken := generateTestConnectToken(t, serverAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
+	client.Connect(connectToken)
+
+	for {
+		client.Update(currentTime)
+		server.Update(currentTime)
+		if client.State() <= ClientStateDisconnected || client.State() == ClientStateConnected {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+		currentTime += deltaTime
+	}
+
+	check(t, client.State() == ClientStateConnected)
+	check(t, server.NumConnectedClients() == 1)
+
+	sender, err := net.Dial("udp4", serverAddress)
+	check(t, err == nil)
+	defer func() { _ = sender.Close() }()
+
+	// real UDP may drop any one datagram, so each attempt sends the burst and then the
+	// payload again, until the server receives the payload or the attempts run out. the
+	// burst is sent on every attempt, so a receive channel too small to hold it drops the
+	// payload on every attempt, not just the first.
+
+	expected := []byte("valid client payload after burst")
+	received := false
+
+	for attempt := 0; attempt < 50 && !received; attempt++ {
+		for i := 0; i < 2000; i++ {
+			_, err = sender.Write([]byte{0})
+			check(t, err == nil)
+		}
+
+		client.SendPacket(expected)
+		client.Update(currentTime)
+
+		time.Sleep(50 * time.Millisecond)
+
+		currentTime += deltaTime
+		server.Update(currentTime)
+
+		for {
+			packet, _ := server.ReceivePacket(0)
+			if packet == nil {
+				break
+			}
+			check(t, bytes.Equal(packet, expected))
+			received = true
+		}
+	}
+
+	if !received {
+		t.Fatalf("the server never received the client payload %q after a burst", expected)
+	}
+}
+
+// packetTaggingCodepoint is the DSCP value enablePacketTagging sets
+// (expedited forwarding).
+const packetTaggingCodepoint = 46
+
+// packetTaggingSockopt returns the socket option level and name that
+// enablePacketTagging sets, and false on platforms where tagging is not
+// implemented. IPV6_TCLASS is not declared in package syscall on every
+// platform, so its value is given per platform.
+func packetTaggingSockopt(ipv6 bool) (level, opt int, ok bool) {
+	switch runtime.GOOS {
+	case "darwin", "linux", "freebsd", "openbsd", "netbsd":
+	default:
+		return 0, 0, false
+	}
+	if !ipv6 {
+		return syscall.IPPROTO_IP, syscall.IP_TOS, true
+	}
+	switch runtime.GOOS {
+	case "linux":
+		return syscall.IPPROTO_IPV6, 67, true
+	case "darwin":
+		return syscall.IPPROTO_IPV6, 36, true
+	default:
+		return syscall.IPPROTO_IPV6, 61, true
+	}
+}
+
+// getsockoptInt calls get with fd converted to its descriptor type, which is
+// int on unix and syscall.Handle on Windows.
+func getsockoptInt[T ~int | ~uintptr](get func(T, int, int) (int, error), fd uintptr, level, opt int) (int, error) {
+	return get(T(fd), level, opt)
+}
+
+// checkPacketTaggingApplied fails the test unless conn carries the codepoint
+// enablePacketTagging sets.
+func checkPacketTaggingApplied(t *testing.T, conn *net.UDPConn, ipv6 bool) {
+	t.Helper()
+	level, opt, ok := packetTaggingSockopt(ipv6)
+	if !ok {
+		return
+	}
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		t.Fatalf("get raw connection: %v", err)
+	}
+	var value int
+	var sockoptErr error
+	if err := rawConn.Control(func(fd uintptr) {
+		value, sockoptErr = getsockoptInt(syscall.GetsockoptInt, fd, level, opt)
+	}); err != nil {
+		t.Fatalf("control raw connection: %v", err)
+	}
+	if sockoptErr != nil {
+		t.Fatalf("read packet tagging socket option: %v", sockoptErr)
+	}
+	if value != packetTaggingCodepoint {
+		t.Fatalf("expected packet tagging codepoint %d, got %d", packetTaggingCodepoint, value)
+	}
+}
+
+// TestPacketTagging enables packet tagging process-wide, so it restores the
+// flag when the test finishes to keep later tests unaffected.
 func TestPacketTagging(t *testing.T) {
+	requireFunctional(t)
 	// IMPORTANT: Packet tagging is off by default because it doesn't play well with some older home routers
 	// See https://learn.microsoft.com/en-us/gaming/gdk/_content/gc/networking/overviews/qos-packet-tagging
 	// However, I really recommend providing players with a way to turn it on, since it can significantly reduce
 	// jitter playing over Wi-Fi.
+
+	// Cleanups run in reverse order, so check the restored value after the flag
+	// has been reset.
+	t.Cleanup(func() {
+		if packetTaggingEnabled {
+			t.Error("packet tagging was left enabled")
+		}
+	})
+	t.Cleanup(func() { packetTaggingEnabled = false })
 
 	EnablePacketTagging()
 
@@ -1428,9 +2151,11 @@ func TestPacketTagging(t *testing.T) {
 
 		server, err := NewServer(serverAddress, nil, 0.0)
 		check(t, err == nil)
+		checkPacketTaggingApplied(t, server.socketHolder.ipv4.conn, false)
 
 		client, err := NewClient("127.0.0.1:50000", nil, 0.0)
 		check(t, err == nil)
+		checkPacketTaggingApplied(t, client.socketHolder.ipv4.conn, false)
 
 		connectToken := generateTestConnectToken(t, serverAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1446,9 +2171,11 @@ func TestPacketTagging(t *testing.T) {
 
 		server, err := NewServer(serverAddress, nil, 0.0)
 		check(t, err == nil)
+		checkPacketTaggingApplied(t, server.socketHolder.ipv6.conn, true)
 
 		client, err := NewClient("[::1]:50000", nil, 0.0)
 		check(t, err == nil)
+		checkPacketTaggingApplied(t, client.socketHolder.ipv6.conn, true)
 
 		connectToken := generateTestConnectToken(t, serverAddress, testConnectTokenExpiry, testTimeoutSeconds, randomUint64())
 
@@ -1458,4 +2185,146 @@ func TestPacketTagging(t *testing.T) {
 
 		server.Close()
 	}
+}
+
+func TestClientPacketFromOtherAddressLeavesReplayProtection(t *testing.T) {
+	client, err := NewClient("127.0.0.1:50000", &ClientConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     testSendPacketOverride,
+		ReceivePacketOverride:  testReceivePacketOverride,
+	}, 0.0)
+	check(t, err == nil)
+	defer client.Close()
+
+	packetKey := GenerateKey()
+	copy(client.readPacketKey[:], packetKey)
+	client.hasServerNonce = true
+	client.connectToken.protocolID = testProtocolID
+
+	// the connected client sends disconnect packets when closed, so give it its own write key
+	copy(client.writePacketKey[:], GenerateKey())
+
+	serverAddress, err := ParseAddress("127.0.0.1:40000")
+	check(t, err == nil)
+	otherAddress, err := ParseAddress("127.0.0.1:40001")
+	check(t, err == nil)
+	client.serverAddress = serverAddress
+
+	client.clientIndex = 0
+	client.maxClients = 1
+
+	client.setState(ClientStateConnected)
+
+	mostRecentSequence := client.replayProtection.mostRecentSequence
+
+	packet := &connectionKeepAlive{clientIndex: 0, maxClients: 1}
+
+	var buffer [maxPacketBytes]byte
+
+	// a packet that authenticates under the client's key, but comes from another address,
+	// must not move the client's replay protection
+	bytesWritten := writePacket(packet, buffer[:], 1000000, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	client.ProcessPacket(&otherAddress, buffer[:bytesWritten])
+
+	check(t, client.replayProtection.mostRecentSequence == mostRecentSequence)
+
+	// and the client still accepts the next packet from its server
+	client.time = 10.0
+
+	bytesWritten = writePacket(packet, buffer[:], 1, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	client.ProcessPacket(&serverAddress, buffer[:bytesWritten])
+
+	check(t, client.lastPacketReceiveTime == 10.0)
+}
+
+func TestKeepAliveRejectsOutOfRangeIndexAndMaxClients(t *testing.T) {
+	serverAddress := Address{Type: AddressIPv4, IPv4: [4]byte{127, 0, 0, 1}, Port: 40000}
+	cases := []struct {
+		name        string
+		clientIndex int32
+		maxClients  int32
+	}{
+		{name: "client index", clientIndex: -1, maxClients: 8},
+		{name: "max clients", clientIndex: 0, maxClients: 2147483647},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &Client{
+				state:         ClientStateSendingConnectionResponse,
+				serverAddress: serverAddress,
+				clientIndex:   3,
+				maxClients:    8,
+			}
+			client.processPacketInternal(&serverAddress, &connectionKeepAlive{
+				clientIndex: tc.clientIndex,
+				maxClients:  tc.maxClients,
+			}, 1)
+			if client.Index() != 3 || client.MaxClients() != 8 {
+				t.Fatalf("out-of-range keep-alive stored index=%d maxClients=%d", client.Index(), client.MaxClients())
+			}
+			if client.State() != ClientStateSendingConnectionResponse {
+				t.Fatalf("out-of-range keep-alive was accepted, state=%d", client.State())
+			}
+		})
+	}
+}
+
+func TestConnectionRequestMappingExpiresWithConnectToken(t *testing.T) {
+	simulator := NewNetworkSimulator()
+
+	currentTime := 1000.0
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: simulator,
+	}
+	server, err := NewServer("[::1]:40000", serverConfig, currentTime)
+	check(t, err == nil)
+	defer server.Close()
+
+	startServerOneSecondEarlier(server, 1)
+
+	connectTokenData := generateTestConnectToken(t, "[::1]:40000", testConnectTokenExpiry, -1, randomUint64())
+
+	var token connectToken
+	check(t, token.read(connectTokenData) == nil)
+
+	from, err := ParseAddress("[::1]:50000")
+	check(t, err == nil)
+
+	packet := &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  testProtocolID,
+		connectTokenExpireTimestamp: token.expireTimestamp,
+		connectTokenNonce:           token.nonce,
+		connectTokenData:            token.privateData,
+	}
+	RandomBytes(packet.clientSalt[:])
+
+	check(t, decryptConnectTokenPrivate(packet.connectTokenData[:],
+		testProtocolID,
+		packet.connectTokenExpireTimestamp,
+		packet.connectTokenNonce[:],
+		testPrivateKey[:]) == nil)
+
+	// the request arrives with two seconds left on its connect token
+
+	previousNowUnix := nowUnix
+	nowUnix = func() uint64 { return token.expireTimestamp - 2 }
+	defer func() { nowUnix = previousNowUnix }()
+
+	server.processConnectionRequestPacket(&from, packet, nowUnix())
+
+	check(t, server.encryptionManager.findEncryptionMapping(&from, currentTime) != -1)
+
+	// the handshake is never completed, so the pending mapping must not outlive the connect token
+
+	afterTokenExpires := currentTime + 3.0
+
+	check(t, server.encryptionManager.findEncryptionMapping(&from, afterTokenExpires) == -1)
 }

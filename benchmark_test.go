@@ -161,8 +161,10 @@ func BenchmarkClientServerUpdate(b *testing.B) {
 	}
 	defer server.Close()
 
-	server.Start(1)
+	startServerOneSecondEarlier(server, 1)
 
+	// one second beyond the server's maximum lifetime, so a token issued in the
+	// second the server started expires after its start floor
 	connectToken, err := GenerateConnectToken([]string{"[::1]:40000"}, []string{"[::1]:40000"},
 		testConnectTokenExpiry, testTimeoutSeconds, testClientID, testProtocolID, testPrivateKey[:], nil)
 	if err != nil {

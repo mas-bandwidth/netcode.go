@@ -25,6 +25,12 @@ import (
 
 const cInteropTimeout = 30 * time.Second
 
+// cServerStartupDelay is how long the C server is given to start before the test
+// waits for the next second. It is not measured: the C server starts in a few
+// milliseconds here, and a slower start only makes the token's second the same as
+// the server's, which the test reports as a failed connect.
+const cServerStartupDelay = 250 * time.Millisecond
+
 // The C example client and server use this address when passed as argv[1],
 // this private key (the well known netcode test key, testPrivateKey), and
 // protocol id 0x1122334455667788 (testProtocolID).
@@ -68,6 +74,27 @@ func startCBinary(t *testing.T, binary string, args ...string) {
 	})
 }
 
+// waitForNextSecond sleeps until the wall clock has advanced into the next whole
+// second, plus a 50ms margin. A server refuses a connect token issued in the
+// second it started, so a test on the real clock waits for the next second after
+// the server starts before a token is issued. On Linux, Go's time.Now() reads
+// CLOCK_REALTIME while C's time(NULL) in netcode_generate_connect_token reads
+// CLOCK_REALTIME_COARSE via the vDSO, which can lag CLOCK_REALTIME by one kernel
+// tick across a whole-second boundary; the extra 50ms ensures both clocks observe
+// the new second.
+func waitForNextSecond() {
+	startSecond := time.Now().Unix()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Unix() <= startSecond && time.Now().Before(deadline) {
+		remaining := time.Second - time.Duration(time.Now().Nanosecond())
+		if remaining < time.Millisecond {
+			remaining = time.Millisecond
+		}
+		time.Sleep(remaining)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
 func cInteropPayload() []byte {
 	// the C examples send and assert payload packets of MaxPacketSize bytes
 	// filled with this pattern
@@ -84,6 +111,7 @@ func cInteropPayload() []byte {
 // challenge/response, keep-alive and payload packets must round trip between
 // the two implementations.
 func TestCInteropClientConnectsToCServer(t *testing.T) {
+	auditor := startNonceAudit(t)
 	serverBinary := cInteropBinary(t, "server")
 
 	serverAddress := "127.0.0.1:40100"
@@ -93,6 +121,11 @@ func TestCInteropClientConnectsToCServer(t *testing.T) {
 	client, err := NewClient("0.0.0.0:0", nil, 0.0)
 	check(t, err == nil)
 	defer client.Close()
+
+	// the C server starts in its own process. give it a moment to start, then issue the
+	// token in a later second than the one it started in
+	time.Sleep(cServerStartupDelay)
+	waitForNextSecond()
 
 	connectToken, err := GenerateConnectToken([]string{serverAddress}, []string{serverAddress},
 		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
@@ -129,6 +162,9 @@ func TestCInteropClientConnectsToCServer(t *testing.T) {
 		}
 
 		if client.State() == ClientStateConnected && payloadPacketsReceived >= 10 {
+			pairs, repeats := auditor.stats()
+			check(t, pairs > 0)
+			check(t, repeats == 0)
 			return // success: connected to the C server and exchanged payload packets
 		}
 
@@ -144,6 +180,7 @@ func TestCInteropClientConnectsToCServer(t *testing.T) {
 // by the C implementation with libsodium, and complete the handshake and
 // payload exchange with the C client.
 func TestCInteropCClientConnectsToGoServer(t *testing.T) {
+	auditor := startNonceAudit(t)
 	clientBinary := cInteropBinary(t, "client")
 
 	serverAddress := "127.0.0.1:40200"
@@ -158,6 +195,9 @@ func TestCInteropCClientConnectsToGoServer(t *testing.T) {
 	defer server.Close()
 
 	server.Start(MaxClients)
+
+	// the C client issues its token when it starts, so start it in a later second
+	waitForNextSecond()
 
 	startCBinary(t, clientBinary, serverAddress)
 
@@ -186,6 +226,9 @@ func TestCInteropCClientConnectsToGoServer(t *testing.T) {
 		}
 
 		if server.ClientConnected(0) && payloadPacketsReceived >= 10 {
+			pairs, repeats := auditor.stats()
+			check(t, pairs > 0)
+			check(t, repeats == 0)
 			return // success: the C client connected and exchanged payload packets
 		}
 
@@ -194,4 +237,86 @@ func TestCInteropCClientConnectsToGoServer(t *testing.T) {
 
 	t.Fatalf("timed out: %d clients connected, %d payload packets received from C client",
 		server.NumConnectedClients(), payloadPacketsReceived)
+}
+
+// TestCInteropMultiServerFailoverToCServer exercises NETCODE 1.03 multi-server
+// failover across a full Go server (emitting connection denied with serverNonce
+// + 30-byte AAD) to a live C reference server (rotating clientSalt and
+// completing the handshake + payload exchange).
+func TestCInteropMultiServerFailoverToCServer(t *testing.T) {
+	auditor := startNonceAudit(t)
+	serverBinary := cInteropBinary(t, "server")
+
+	fullGoServerAddress := "127.0.0.1:40300"
+	cServerAddress := "127.0.0.1:40301"
+
+	fullServer, err := NewServer(fullGoServerAddress, &ServerConfig{
+		ProtocolID:                 testProtocolID,
+		PrivateKey:                 testPrivateKey,
+		SendLoopbackPacketCallback: func(clientIndex int, packetData []byte, packetSequence uint64) {},
+	}, 0.0)
+	check(t, err == nil)
+	defer fullServer.Close()
+
+	fullServer.Start(1)
+	fullServer.ConnectLoopbackClient(0, 999, nil)
+	check(t, fullServer.NumConnectedClients() == 1)
+
+	startCBinary(t, serverBinary, cServerAddress)
+
+	client, err := NewClient("0.0.0.0:0", nil, 0.0)
+	check(t, err == nil)
+	defer client.Close()
+
+	time.Sleep(cServerStartupDelay)
+	waitForNextSecond()
+
+	serverAddresses := []string{fullGoServerAddress, cServerAddress}
+	connectToken, err := GenerateConnectToken(serverAddresses, serverAddresses,
+		testConnectTokenExpiry, testTimeoutSeconds, randomUint64(), testProtocolID, testPrivateKey[:], randomUserData())
+	check(t, err == nil)
+
+	client.Connect(connectToken)
+
+	payload := cInteropPayload()
+	payloadPacketsReceived := 0
+
+	start := time.Now()
+	deadline := start.Add(cInteropTimeout)
+
+	for time.Now().Before(deadline) {
+		currentTime := time.Since(start).Seconds()
+
+		fullServer.Update(currentTime)
+		client.Update(currentTime)
+
+		if client.State() == ClientStateConnected {
+			client.SendPacket(payload)
+		}
+
+		for {
+			packet, _ := client.ReceivePacket()
+			if packet == nil {
+				break
+			}
+			check(t, bytes.Equal(packet, payload))
+			payloadPacketsReceived++
+		}
+
+		if client.State() <= ClientStateDisconnected {
+			t.Fatalf("client failed to fail over to C server: %s", ClientStateName(client.State()))
+		}
+
+		if client.State() == ClientStateConnected && payloadPacketsReceived >= 10 {
+			pairs, repeats := auditor.stats()
+			check(t, pairs > 0)
+			check(t, repeats == 0)
+			return
+		}
+
+		time.Sleep(time.Second / 60)
+	}
+
+	t.Fatalf("timed out: client state %q, %d payload packets received from C server",
+		ClientStateName(client.State()), payloadPacketsReceived)
 }

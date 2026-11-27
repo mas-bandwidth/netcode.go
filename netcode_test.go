@@ -3,6 +3,14 @@ package netcode
 import (
 	"bytes"
 	"errors"
+	"math"
+	"net"
+	"net/netip"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,7 +23,24 @@ const (
 	testServerPort         = 40000
 	testConnectTokenExpiry = 30
 	testTimeoutSeconds     = 15
+
+	// testNowUnix is the fixed Unix time used by the unit tests, so token
+	// timestamps do not depend on the wall clock.
+	testNowUnix = uint64(1700000000)
 )
+
+// TestMain pins the clock for the unit tests. The C interoperability tests run
+// the reference implementation in another process with the real clock, so
+// leave the clock alone when they are enabled.
+func TestMain(m *testing.M) {
+	previousNowUnix := nowUnix
+	if os.Getenv("NETCODE_C_BIN_DIR") == "" {
+		nowUnix = func() uint64 { return testNowUnix }
+	}
+	code := m.Run()
+	nowUnix = previousNowUnix
+	os.Exit(code)
+}
 
 var testPrivateKey = [KeyBytes]byte{
 	0x60, 0x6a, 0xbe, 0x6e, 0xc9, 0x19, 0x10, 0xea,
@@ -28,6 +53,19 @@ func check(t *testing.T, condition bool) {
 	t.Helper()
 	if !condition {
 		t.Fatal("check failed")
+	}
+}
+
+func testSendPacketOverride(to *Address, packetData []byte) {}
+
+func testReceivePacketOverride() (packetData []byte, from Address, ok bool) {
+	return nil, Address{}, false
+}
+
+func requireFunctional(t *testing.T) {
+	t.Helper()
+	if os.Getenv("NETCODE_FUNCTIONAL_TESTS") != "1" {
+		t.Skip("set NETCODE_FUNCTIONAL_TESTS=1 to run tests that use real sockets")
 	}
 }
 
@@ -141,6 +179,12 @@ func TestAddress(t *testing.T) {
 			"...",
 			"....",
 			".....",
+			"[::1]]:80",
+			"[[::1]]",
+			"[::1]:80]",
+			"fe80::1%en0",
+			"[fe80::1%en0]",
+			"[fe80::1%en0]:40000",
 		}
 		for _, s := range badAddresses {
 			if _, err := ParseAddress(s); err == nil {
@@ -363,7 +407,7 @@ func TestConnectToken(t *testing.T) {
 
 	// encrypt the buffer
 
-	expireTimestamp := uint64(time.Now().Unix()) + 30
+	expireTimestamp := testNowUnix + 30
 	nonce := generateNonce()
 	key := GenerateKey()
 
@@ -455,7 +499,7 @@ func TestConnectionRequestPacket(t *testing.T) {
 
 	encryptedConnectTokenData := connectTokenData
 
-	connectTokenExpireTimestamp := uint64(time.Now().Unix()) + 30
+	connectTokenExpireTimestamp := testNowUnix + 30
 	connectTokenNonce := generateNonce()
 	connectTokenKey := GenerateKey()
 
@@ -470,6 +514,7 @@ func TestConnectionRequestPacket(t *testing.T) {
 		connectTokenNonce:           connectTokenNonce,
 		connectTokenData:            encryptedConnectTokenData,
 	}
+	RandomBytes(inputPacket.clientSalt[:])
 
 	// write the connection request packet to a buffer
 
@@ -478,14 +523,15 @@ func TestConnectionRequestPacket(t *testing.T) {
 
 	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
 
-	check(t, bytesWritten > 0)
+	check(t, bytesWritten == connectionRequestPacketBytes)
 
 	// read the connection request packet back in from the buffer (the connect token data is decrypted as part of the read packet validation)
 
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, connectTokenKey, &allowedPackets, nil).(*connectionRequest)
+	readBuf := append([]byte(nil), buffer[:bytesWritten]...)
+	outputPacket, ok := readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, connectTokenKey, &allowedPackets, nil).(*connectionRequest)
 
 	check(t, ok)
 
@@ -496,12 +542,23 @@ func TestConnectionRequestPacket(t *testing.T) {
 	check(t, outputPacket.connectTokenExpireTimestamp == inputPacket.connectTokenExpireTimestamp)
 	check(t, outputPacket.connectTokenNonce == inputPacket.connectTokenNonce)
 	check(t, bytes.Equal(outputPacket.connectTokenData[:connectTokenPrivateBytes-MacBytes], connectTokenData[:connectTokenPrivateBytes-MacBytes]))
+	check(t, outputPacket.clientSalt == inputPacket.clientSalt)
+
+	// a 1078-byte NETCODE 1.02 request or wrong version string must be rejected
+
+	readBuf = append([]byte(nil), buffer[:bytesWritten-connectSaltBytes]...)
+	check(t, readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, connectTokenKey, &allowedPackets, nil) == nil)
+
+	readBuf = append([]byte(nil), buffer[:bytesWritten]...)
+	readBuf[1+11] = '2'
+	check(t, readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, connectTokenKey, &allowedPackets, nil) == nil)
 }
 
 func TestConnectionDeniedPacket(t *testing.T) {
 	// setup a connection denied packet
 
 	inputPacket := &connectionDenied{}
+	RandomBytes(inputPacket.serverNonce[:])
 
 	// write the packet to a buffer
 
@@ -510,24 +567,36 @@ func TestConnectionDeniedPacket(t *testing.T) {
 
 	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
 
-	check(t, bytesWritten > 0)
+	check(t, bytesWritten == 1+2+serverNonceBytes+MacBytes)
 
 	// read the packet back in from the buffer
 
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionDenied)
+	readBuf := append([]byte(nil), buffer[:bytesWritten]...)
+	outputPacket, ok := readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionDenied)
 
 	check(t, ok)
 	check(t, outputPacket != nil)
 	check(t, sequence == 1000)
+	check(t, outputPacket.serverNonce == inputPacket.serverNonce)
+
+	// tampering with serverNonce or truncating below headerNonceBytes + MAC is rejected
+
+	readBuf = append([]byte(nil), buffer[:bytesWritten]...)
+	readBuf[1+int(readBuf[0]>>4)] ^= 0x01
+	check(t, readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil) == nil)
+
+	readBuf = append([]byte(nil), buffer[:bytesWritten-1]...)
+	check(t, readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil) == nil)
 }
 
 func TestConnectionChallengePacket(t *testing.T) {
 	// setup a connection challenge packet
 
 	inputPacket := &connectionChallenge{}
+	RandomBytes(inputPacket.serverNonce[:])
 	inputPacket.challengeTokenSequence = 0
 	RandomBytes(inputPacket.challengeTokenData[:])
 
@@ -538,21 +607,29 @@ func TestConnectionChallengePacket(t *testing.T) {
 
 	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
 
-	check(t, bytesWritten > 0)
+	check(t, bytesWritten == 1+2+serverNonceBytes+8+challengeTokenBytes+MacBytes)
 
 	// read the packet back in from the buffer
 
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionChallenge)
+	readBuf := append([]byte(nil), buffer[:bytesWritten]...)
+	outputPacket, ok := readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionChallenge)
 
 	check(t, ok)
 
 	// make sure the read packet matches what was written
 
+	check(t, outputPacket.serverNonce == inputPacket.serverNonce)
 	check(t, outputPacket.challengeTokenSequence == inputPacket.challengeTokenSequence)
 	check(t, outputPacket.challengeTokenData == inputPacket.challengeTokenData)
+
+	// tampering with serverNonce in the cleartext header is rejected by 30-byte AAD
+
+	readBuf = append([]byte(nil), buffer[:bytesWritten]...)
+	readBuf[1+int(readBuf[0]>>4)] ^= 0x01
+	check(t, readPacket(readBuf, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil) == nil)
 }
 
 func TestConnectionResponsePacket(t *testing.T) {
@@ -576,7 +653,7 @@ func TestConnectionResponsePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionResponse)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionResponse)
 
 	check(t, ok)
 
@@ -608,7 +685,7 @@ func TestConnectionKeepAlivePacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionKeepAlive)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionKeepAlive)
 
 	check(t, ok)
 
@@ -638,7 +715,7 @@ func TestConnectionPayloadPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionPayload)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionPayload)
 
 	check(t, ok)
 
@@ -666,10 +743,116 @@ func TestConnectionDisconnectPacket(t *testing.T) {
 	var sequence uint64
 	allowedPackets := allPacketsAllowed()
 
-	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil).(*connectionDisconnect)
+	outputPacket, ok := readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, nil).(*connectionDisconnect)
 
 	check(t, ok)
 	check(t, outputPacket != nil)
+}
+
+func TestReadPacketRejectsInvalidPackets(t *testing.T) {
+	packetKey := GenerateKey()
+	wrongPacketKey := GenerateKey()
+	privateKey := GenerateKey()
+	wrongPrivateKey := GenerateKey()
+
+	connectTokenExpireTimestamp := testNowUnix + 30
+	connectTokenNonce := generateNonce()
+	var connectTokenData [connectTokenPrivateBytes]byte
+	check(t, encryptConnectTokenPrivate(connectTokenData[:], testProtocolID, connectTokenExpireTimestamp, connectTokenNonce[:], privateKey) == nil)
+
+	testCases := []struct {
+		name     string
+		packet   packet
+		private  []byte
+		wrongKey []byte
+	}{
+		{
+			name: "connection request",
+			packet: &connectionRequest{
+				versionInfo:                 versionInfo,
+				protocolID:                  testProtocolID,
+				connectTokenExpireTimestamp: connectTokenExpireTimestamp,
+				connectTokenNonce:           connectTokenNonce,
+				connectTokenData:            connectTokenData,
+			},
+			private:  privateKey,
+			wrongKey: wrongPrivateKey,
+		},
+		{
+			name:     "connection denied",
+			packet:   &connectionDenied{},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection challenge",
+			packet:   &connectionChallenge{challengeTokenSequence: 1000},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection response",
+			packet:   &connectionResponse{challengeTokenSequence: 1000},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection keep alive",
+			packet:   &connectionKeepAlive{clientIndex: 10, maxClients: 16},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection payload",
+			packet:   &connectionPayload{payloadData: []byte("payload")},
+			wrongKey: wrongPacketKey,
+		},
+		{
+			name:     "connection disconnect",
+			packet:   &connectionDisconnect{},
+			wrongKey: wrongPacketKey,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var buffer [maxPacketBytes]byte
+			bytesWritten := writePacket(testCase.packet, buffer[:], 1000, packetKey, testProtocolID)
+			check(t, bytesWritten > 0)
+
+			allowedPackets := allPacketsAllowed()
+
+			read := func(data []byte, key []byte, protocolID uint64, privateKey []byte) packet {
+				copied := append([]byte(nil), data...)
+				var sequence uint64
+				return readPacket(copied, &sequence, key, protocolID, testNowUnix, 0, privateKey, &allowedPackets, nil)
+			}
+
+			// the unmodified packet is accepted
+
+			check(t, read(buffer[:bytesWritten], packetKey, testProtocolID, testCase.private) != nil)
+
+			// a flipped ciphertext or tag byte is refused
+
+			tampered := append([]byte(nil), buffer[:bytesWritten]...)
+			tagByteIndex := bytesWritten - 1
+			if testCase.packet.packetType() == connectionRequestPacket {
+				// connection request appends an unencrypted 8-byte clientSalt after the connect token MAC
+				tagByteIndex = bytesWritten - connectSaltBytes - 1
+			}
+			tampered[tagByteIndex] ^= 0xFF
+			check(t, read(tampered, packetKey, testProtocolID, testCase.private) == nil)
+
+			// a wrong key is refused
+
+			if testCase.private != nil {
+				// a connection request is decrypted with the private key
+				check(t, read(buffer[:bytesWritten], packetKey, testProtocolID, testCase.wrongKey) == nil)
+			} else {
+				check(t, read(buffer[:bytesWritten], testCase.wrongKey, testProtocolID, nil) == nil)
+			}
+
+			// a wrong protocol id is refused
+
+			check(t, read(buffer[:bytesWritten], packetKey, testProtocolID+1, testCase.private) == nil)
+		})
+	}
 }
 
 func TestConnectTokenPublic(t *testing.T) {
@@ -694,7 +877,7 @@ func TestConnectTokenPublic(t *testing.T) {
 
 	// encrypt the buffer
 
-	createTimestamp := uint64(time.Now().Unix())
+	createTimestamp := testNowUnix
 	expireTimestamp := createTimestamp + 30
 	connectTokenNonce := generateNonce()
 	key := GenerateKey()
@@ -736,6 +919,51 @@ func TestConnectTokenPublic(t *testing.T) {
 	check(t, outputConnectToken.clientToServerKey == inputConnectToken.clientToServerKey)
 	check(t, outputConnectToken.serverToClientKey == inputConnectToken.serverToClientKey)
 	check(t, outputConnectToken.timeoutSeconds == inputConnectToken.timeoutSeconds)
+}
+
+func TestGenerateConnectTokenUsesInjectedClock(t *testing.T) {
+	const injectedNow = uint64(1234567890)
+
+	previousNowUnix := nowUnix
+	nowUnix = func() uint64 { return injectedNow }
+	defer func() { nowUnix = previousNowUnix }()
+
+	serverAddress := testServerAddress()
+
+	connectTokenData, err := GenerateConnectToken(
+		[]string{serverAddress.String()},
+		[]string{serverAddress.String()},
+		testConnectTokenExpiry,
+		testTimeoutSeconds,
+		testClientID,
+		testProtocolID,
+		testPrivateKey[:],
+		nil,
+	)
+	check(t, err == nil)
+
+	var token connectToken
+	check(t, token.read(connectTokenData) == nil)
+	check(t, token.createTimestamp == injectedNow)
+	check(t, token.expireTimestamp == injectedNow+testConnectTokenExpiry)
+}
+
+func TestGenerateConnectTokenRejectsOutOfRangeTimeout(t *testing.T) {
+	serverAddress := testServerAddress()
+
+	for _, timeoutSeconds := range []int{math.MaxInt32 + 1, math.MinInt32 - 1} {
+		_, err := GenerateConnectToken(
+			[]string{serverAddress.String()},
+			[]string{serverAddress.String()},
+			testConnectTokenExpiry,
+			timeoutSeconds,
+			testClientID,
+			testProtocolID,
+			testPrivateKey[:],
+			nil,
+		)
+		check(t, err != nil)
+	}
 }
 
 func TestEncryptionManager(t *testing.T) {
@@ -956,6 +1184,149 @@ func TestReplayProtection(t *testing.T) {
 	// while packets that fell out of the window are rejected as before
 
 	check(t, replay.alreadyReceived(maxUint64-1-replayProtectionBufferSize))
+
+	// max uint64 is the replay buffer's empty-slot marker, so it is not a valid
+	// received sequence. It must be refused, must never update the most recent
+	// sequence, and must not push otherwise valid sequences out of the window.
+
+	replay.reset()
+
+	check(t, !replay.alreadyReceived(maxUint64-1))
+	replay.advanceSequence(maxUint64 - 1)
+
+	check(t, replay.alreadyReceived(maxUint64))
+	replay.advanceSequence(maxUint64)
+
+	check(t, replay.mostRecentSequence == maxUint64-1)
+	check(t, replay.alreadyReceived(maxUint64))
+	check(t, !replay.alreadyReceived(maxUint64-2))
+
+	// the same sequence must be refused when it arrives in a keep alive packet,
+	// even without replay protection, leaving the window unchanged.
+
+	packetKey := GenerateKey()
+	var buffer [maxPacketBytes]byte
+	bytesWritten := writePacket(&connectionKeepAlive{}, buffer[:], maxUint64, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	allowedPackets := allPacketsAllowed()
+
+	var sequence uint64
+	check(t, readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID,
+		uint64(time.Now().Unix()), 0, nil, &allowedPackets, nil) == nil)
+
+	check(t, readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID,
+		uint64(time.Now().Unix()), 0, nil, &allowedPackets, &replay) == nil)
+	check(t, replay.mostRecentSequence == maxUint64-1)
+	check(t, !replay.alreadyReceived(maxUint64-2))
+
+	// a normal sequence still arrives after the reserved one was refused, and a
+	// replay of that normal packet is still caught
+
+	replay.reset()
+
+	// refusing the reserved sequence at the start of the window must leave the
+	// most recent sequence at zero, so the next normal packet is still accepted
+
+	bytesWritten = writePacket(&connectionKeepAlive{}, buffer[:], maxUint64, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	check(t, readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID,
+		uint64(time.Now().Unix()), 0, nil, &allowedPackets, &replay) == nil)
+	check(t, replay.mostRecentSequence == 0)
+
+	bytesWritten = writePacket(&connectionKeepAlive{}, buffer[:], 1, packetKey, testProtocolID)
+	check(t, bytesWritten > 0)
+
+	check(t, readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID,
+		uint64(time.Now().Unix()), 0, nil, &allowedPackets, &replay) != nil)
+	check(t, sequence == 1)
+	check(t, replay.mostRecentSequence == 1)
+	check(t, replay.alreadyReceived(1))
+
+	check(t, readPacket(buffer[:bytesWritten], &sequence, packetKey, testProtocolID,
+		uint64(time.Now().Unix()), 0, nil, &allowedPackets, &replay) == nil)
+}
+
+func TestReadPacketRejectsReplay(t *testing.T) {
+	inputPacket := &connectionPayload{payloadData: []byte("replay test payload")}
+
+	var buffer [maxPacketBytes]byte
+	packetKey := GenerateKey()
+
+	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
+
+	check(t, bytesWritten > 0)
+
+	wireBytes := make([]byte, bytesWritten)
+	copy(wireBytes, buffer[:bytesWritten])
+
+	var replay replayProtection
+	replay.reset()
+
+	allowedPackets := allPacketsAllowed()
+
+	// readPacket decrypts in place, so each call gets its own copy of the same wire bytes
+
+	firstBytes := make([]byte, len(wireBytes))
+	copy(firstBytes, wireBytes)
+
+	var firstSequence uint64
+	firstPacket := readPacket(firstBytes, &firstSequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay)
+
+	check(t, firstPacket != nil)
+	check(t, firstSequence == 1000)
+
+	secondBytes := make([]byte, len(wireBytes))
+	copy(secondBytes, wireBytes)
+
+	var secondSequence uint64
+	secondPacket := readPacket(secondBytes, &secondSequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay)
+
+	check(t, secondPacket == nil)
+}
+
+func TestReadPacketIgnoresCorruptedPacket(t *testing.T) {
+	inputPacket := &connectionPayload{payloadData: []byte("corrupted packet payload")}
+
+	var buffer [maxPacketBytes]byte
+	packetKey := GenerateKey()
+
+	bytesWritten := writePacket(inputPacket, buffer[:], 1000, packetKey, testProtocolID)
+
+	check(t, bytesWritten > 0)
+
+	wireBytes := make([]byte, bytesWritten)
+	copy(wireBytes, buffer[:bytesWritten])
+
+	var replay replayProtection
+	replay.reset()
+
+	allowedPackets := allPacketsAllowed()
+
+	// a corrupted packet at sequence 1000 must be ignored without affecting replay protection
+
+	corruptedBytes := make([]byte, len(wireBytes))
+	copy(corruptedBytes, wireBytes)
+	corruptedBytes[len(corruptedBytes)-1] ^= 0xFF
+
+	var corruptedSequence uint64
+	corruptedPacket := readPacket(corruptedBytes, &corruptedSequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay)
+
+	check(t, corruptedPacket == nil)
+	check(t, corruptedSequence == 1000)
+
+	// the authentic packet at the same sequence must still be accepted
+
+	authenticBytes := make([]byte, len(wireBytes))
+	copy(authenticBytes, wireBytes)
+
+	var sequence uint64
+	outputPacket, ok := readPacket(authenticBytes, &sequence, packetKey, testProtocolID, testNowUnix, 0, nil, &allowedPackets, &replay).(*connectionPayload)
+
+	check(t, ok)
+	check(t, sequence == 1000)
+	check(t, bytes.Equal(outputPacket.payloadData, inputPacket.payloadData))
 }
 
 func TestRuntimeGuards(t *testing.T) {
@@ -963,7 +1334,7 @@ func TestRuntimeGuards(t *testing.T) {
 
 	// no private key needed: nothing in this test decrypts anything
 
-	serverConfig := &ServerConfig{ProtocolID: testProtocolID}
+	serverConfig := &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}
 
 	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
 	check(t, err == nil)
@@ -1024,7 +1395,52 @@ func TestRuntimeGuards(t *testing.T) {
 	check(t, server.NumConnectedClients() == 0)
 }
 
+func TestConnectLoopbackClientRequiresSendLoopbackPacketCallback(t *testing.T) {
+	// a loopback connection needs a send callback, so without one it must be
+	// refused rather than accepted in a half-connected state
+
+	serverConfig := &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}
+
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 1000.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	server.ConnectLoopbackClient(0, testClientID, nil)
+
+	server.SendPacket(0, []byte{1})
+
+	check(t, !server.ClientLoopback(0))
+	check(t, !server.ClientConnected(0))
+	check(t, server.NumConnectedClients() == 0)
+}
+
+func TestConnectLoopbackRequiresSendLoopbackPacketCallback(t *testing.T) {
+	// a loopback connection needs a send callback, so without one the client
+	// must stay disconnected
+
+	client, err := NewClient("127.0.0.1:50000", &ClientConfig{OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}, 1000.0)
+	check(t, err == nil)
+	defer client.Close()
+
+	client.ConnectLoopback(0, 1)
+
+	client.SendPacket([]byte{1})
+
+	check(t, !client.Loopback())
+	check(t, client.State() == ClientStateDisconnected)
+}
+
+func TestVersionConstants(t *testing.T) {
+	check(t, VersionMajor == 1)
+	check(t, VersionMinor == 5)
+	check(t, VersionPatch == 0)
+	check(t, VersionFull == "1.5.0")
+}
+
 func TestInitAndDefaults(t *testing.T) {
+	requireFunctional(t)
 	// a nil config must give working defaults instead of crashing
 
 	{
@@ -1043,6 +1459,7 @@ func TestInitAndDefaults(t *testing.T) {
 }
 
 func TestClientCreateError(t *testing.T) {
+	requireFunctional(t)
 	// successful create returns no error
 
 	{
@@ -1104,6 +1521,7 @@ func TestClientCreateError(t *testing.T) {
 }
 
 func TestServerCreateError(t *testing.T) {
+	requireFunctional(t)
 	// successful create returns no error
 
 	{
@@ -1152,6 +1570,132 @@ func TestServerCreateError(t *testing.T) {
 		check(t, server == nil)
 		check(t, errors.Is(err, ErrServerBindSocketIPv6Failed))
 	}()
+}
+
+func TestClientCreateRequiresOverrideCallbacks(t *testing.T) {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false }
+
+	cases := []struct {
+		name    string
+		address string
+		config  *ClientConfig
+	}{
+		{"neither callback", "0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true}},
+		{"missing send callback", "0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true, ReceivePacketOverride: receive}},
+		{"missing receive callback", "0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true, SendPacketOverride: send}},
+		{"callbacks checked before address", "not an address", &ClientConfig{OverrideSendAndReceive: true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := NewClient(tc.address, tc.config, 0.0)
+			check(t, client == nil)
+			check(t, errors.Is(err, ErrClientOverrideCallbacksRequired))
+		})
+	}
+
+	// both callbacks supplied creates successfully
+
+	client, err := NewClient("0.0.0.0:0", &ClientConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     send,
+		ReceivePacketOverride:  receive,
+	}, 0.0)
+	check(t, err == nil)
+	check(t, client != nil)
+	client.Close()
+}
+
+func TestServerCreateRequiresOverrideCallbacks(t *testing.T) {
+	send := func(to *Address, packetData []byte) {}
+	receive := func() (packetData []byte, from Address, ok bool) { return nil, Address{}, false }
+
+	cases := []struct {
+		name    string
+		address string
+		config  *ServerConfig
+	}{
+		{"neither callback", "127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true}},
+		{"missing send callback", "127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true, ReceivePacketOverride: receive}},
+		{"missing receive callback", "127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true, SendPacketOverride: send}},
+		{"callbacks checked before address", "not an address", &ServerConfig{OverrideSendAndReceive: true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, err := NewServer(tc.address, tc.config, 0.0)
+			check(t, server == nil)
+			check(t, errors.Is(err, ErrServerOverrideCallbacksRequired))
+		})
+	}
+
+	// both callbacks supplied creates successfully
+
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{
+		OverrideSendAndReceive: true,
+		SendPacketOverride:     send,
+		ReceivePacketOverride:  receive,
+	}, 0.0)
+	check(t, err == nil)
+	check(t, server != nil)
+	server.Close()
+}
+
+func TestOverrideCallbacksRequiredErrorNamesCallbacks(t *testing.T) {
+	// the creation error should say which callbacks are required
+
+	checkMessage := func(t *testing.T, err error) {
+		t.Helper()
+		check(t, err != nil)
+		if err == nil {
+			return
+		}
+		check(t, strings.Contains(err.Error(), "SendPacketOverride"))
+		check(t, strings.Contains(err.Error(), "ReceivePacketOverride"))
+	}
+
+	client, err := NewClient("0.0.0.0:0", &ClientConfig{OverrideSendAndReceive: true}, 0.0)
+	check(t, client == nil)
+	checkMessage(t, err)
+
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{OverrideSendAndReceive: true}, 0.0)
+	check(t, server == nil)
+	checkMessage(t, err)
+}
+
+func TestOverrideCallbacksRequiredWithNetworkSimulator(t *testing.T) {
+	// the network simulator replaces sockets, but not the override callbacks
+
+	client, err := NewClient("127.0.0.1:40000", &ClientConfig{
+		OverrideSendAndReceive: true,
+		NetworkSimulator:       NewNetworkSimulator(),
+	}, 0.0)
+	check(t, client == nil)
+	check(t, errors.Is(err, ErrClientOverrideCallbacksRequired))
+
+	server, err := NewServer("127.0.0.1:40000", &ServerConfig{
+		OverrideSendAndReceive: true,
+		NetworkSimulator:       NewNetworkSimulator(),
+	}, 0.0)
+	check(t, server == nil)
+	check(t, errors.Is(err, ErrServerOverrideCallbacksRequired))
+
+	// with the flag off, nil callbacks are accepted
+
+	client, err = NewClient("127.0.0.1:40000", &ClientConfig{
+		NetworkSimulator: NewNetworkSimulator(),
+	}, 0.0)
+	check(t, err == nil)
+	check(t, client != nil)
+	client.Close()
+
+	server, err = NewServer("127.0.0.1:40000", &ServerConfig{
+		NetworkSimulator: NewNetworkSimulator(),
+	}, 0.0)
+	check(t, err == nil)
+	check(t, server != nil)
+	server.Close()
 }
 
 func TestNetworkSimulatorDeterminism(t *testing.T) {
@@ -1210,6 +1754,7 @@ func TestNetworkSimulatorDeterminism(t *testing.T) {
 }
 
 func TestClientCreate(t *testing.T) {
+	requireFunctional(t)
 	{
 		client, err := NewClient("127.0.0.1:40000", nil, 0.0)
 		check(t, err == nil)
@@ -1264,6 +1809,7 @@ func TestClientCreate(t *testing.T) {
 }
 
 func TestServerCreate(t *testing.T) {
+	requireFunctional(t)
 	{
 		server, err := NewServer("127.0.0.1:40000", nil, 0.0)
 		check(t, err == nil)
@@ -1315,4 +1861,525 @@ func TestServerCreate(t *testing.T) {
 
 		server.Close()
 	}
+}
+
+func TestServerUnknownAddressDoesNotAllocateWhenLoggingOff(t *testing.T) {
+	server, err := NewServer("127.0.0.1:0", &ServerConfig{ProtocolID: testProtocolID, OverrideSendAndReceive: true, SendPacketOverride: testSendPacketOverride, ReceivePacketOverride: testReceivePacketOverride}, 0.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.Start(1)
+
+	previousLogLevel := logLevel
+	SetLogLevel(LogLevelNone)
+	defer SetLogLevel(previousLogLevel)
+
+	from, err := ParseAddress("127.0.0.1:12345")
+	check(t, err == nil)
+
+	packetData := []byte{connectionKeepAlivePacket, 0, 0, 0, 0}
+
+	allocations := testing.AllocsPerRun(100, func() {
+		server.ProcessPacket(&from, packetData)
+	})
+
+	if allocations != 0 {
+		t.Fatalf("processing a packet from an unknown address allocated %v times with logging off", allocations)
+	}
+}
+
+func TestSocketDropSender(t *testing.T) {
+	address := os.Getenv("NETCODE_TEST_DROP_SENDER_ADDRESS")
+	if address == "" {
+		t.Skip("not a sender process")
+	}
+
+	datagrams, err := strconv.Atoi(os.Getenv("NETCODE_TEST_DROP_SENDER_COUNT"))
+	check(t, err == nil)
+
+	conn, err := net.Dial("udp4", address)
+	check(t, err == nil)
+	defer func() { _ = conn.Close() }()
+
+	var gate [1]byte
+	_, err = os.Stdin.Read(gate[:])
+	check(t, err == nil)
+
+	payload := make([]byte, 16)
+	for i := 0; i < datagrams; i++ {
+		_, err := conn.Write(payload)
+		check(t, err == nil)
+	}
+}
+
+// failingSocketReader fails every read until failures run out, then reports
+// the socket closed so the reader goroutine exits.
+type failingSocketReader struct {
+	failures int
+}
+
+func (r *failingSocketReader) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
+	if r.failures == 0 {
+		return 0, netip.AddrPort{}, net.ErrClosed
+	}
+	r.failures--
+	return 0, netip.AddrPort{}, errors.New("read failed")
+}
+
+func TestSocketReadErrorsLogWhileLoggingIsConfigured(t *testing.T) {
+	const failures = 1000
+
+	previousLogLevel := logLevel
+	previousPrintfFunction := printfFunction
+	defer func() {
+		SetLogLevel(previousLogLevel)
+		SetPrintfFunction(previousPrintfFunction)
+	}()
+
+	logged := 0
+	countLogs := func(format string, args ...any) { logged++ }
+
+	backoffs := 0
+	countBackoffs := func(time.Duration) { backoffs++ }
+
+	s := &socket{packets: make(chan receivedPacket, failures)}
+	done := make(chan struct{})
+	go func() {
+		s.readLoop(&failingSocketReader{failures: failures}, countBackoffs)
+		close(done)
+	}()
+
+	for running := true; running; {
+		select {
+		case <-done:
+			running = false
+		default:
+		}
+		SetLogLevel(LogLevelError)
+		SetPrintfFunction(countLogs)
+		s.receivePacket()
+	}
+	for {
+		if _, ok := s.receivePacket(); !ok {
+			break
+		}
+	}
+
+	if logged != failures {
+		t.Fatalf("%d socket read errors were logged %d times", failures, logged)
+	}
+	if backoffs != failures {
+		t.Fatalf("%d socket read errors backed off %d times", failures, backoffs)
+	}
+}
+
+func TestSocketReaderReusesBufferForDroppedPackets(t *testing.T) {
+	requireFunctional(t)
+	const datagrams = 2000
+
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	check(t, err == nil)
+	defer func() { _ = conn.Close() }()
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSocketDropSender$")
+	cmd.Env = append(os.Environ(),
+		"NETCODE_TEST_DROP_SENDER_ADDRESS="+conn.LocalAddr().String(),
+		"NETCODE_TEST_DROP_SENDER_COUNT="+strconv.Itoa(datagrams),
+	)
+
+	stdin, err := cmd.StdinPipe()
+	check(t, err == nil)
+
+	check(t, cmd.Start() == nil)
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	s := &socket{conn: conn, packets: make(chan receivedPacket)}
+	go s.readLoop(conn, time.Sleep)
+
+	var before, after runtime.MemStats
+
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	_, err = stdin.Write([]byte{1})
+	check(t, err == nil)
+	check(t, stdin.Close() == nil)
+	check(t, cmd.Wait() == nil)
+
+	last := before.Mallocs
+	stableSince := time.Now()
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		runtime.ReadMemStats(&after)
+		if after.Mallocs != last {
+			last = after.Mallocs
+			stableSince = time.Now()
+		} else if time.Since(stableSince) >= 50*time.Millisecond {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	allocations := after.Mallocs - before.Mallocs
+	// the count is of every allocation in the process. under the race detector on Windows
+	// the instrumented runtime's read path allocates (1058 for 2000 datagrams observed in
+	// CI), so the count says nothing about the library there and is checked without -race.
+	if !raceEnabled && allocations >= datagrams/2 {
+		t.Fatalf("%d datagrams dropped on a full receive channel caused %d allocations", datagrams, allocations)
+	}
+}
+
+func TestServerProcessPacketZerosPrivateTokenInBuffer(t *testing.T) {
+	serverAddress, err := ParseAddress("127.0.0.1:40000")
+	check(t, err == nil)
+	clientAddress, err := ParseAddress("127.0.0.1:50000")
+	check(t, err == nil)
+
+	userData := make([]byte, UserDataBytes)
+	RandomBytes(userData)
+	inputToken := generateConnectTokenPrivate(testClientID, testTimeoutSeconds, []Address{serverAddress}, userData)
+
+	var encryptedConnectTokenData [connectTokenPrivateBytes]byte
+	inputToken.write(encryptedConnectTokenData[:])
+
+	// far in the future, so the request is never refused as expired before it is decrypted
+	connectTokenExpireTimestamp := uint64(1) << 62
+	connectTokenNonce := generateNonce()
+	check(t, encryptConnectTokenPrivate(encryptedConnectTokenData[:], testProtocolID, connectTokenExpireTimestamp, connectTokenNonce[:], testPrivateKey[:]) == nil)
+
+	requestPacket := &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  testProtocolID,
+		connectTokenExpireTimestamp: connectTokenExpireTimestamp,
+		connectTokenNonce:           connectTokenNonce,
+		connectTokenData:            encryptedConnectTokenData,
+	}
+
+	var rawBuffer [maxPacketBytes]byte
+	bytesWritten := writePacket(requestPacket, rawBuffer[:], 0, nil, testProtocolID)
+	check(t, bytesWritten > 0)
+	packetBuffer := rawBuffer[:bytesWritten]
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 1000.0)
+	check(t, err == nil)
+	defer server.Close()
+	server.Start(1)
+	server.minConnectTokenExpireTimestamp = 0
+
+	server.ProcessPacket(&clientAddress, packetBuffer)
+
+	// the request was decrypted and accepted, so the check below is not vacuous
+	check(t, server.encryptionManager.findEncryptionMapping(&clientAddress, server.time) != -1)
+
+	if bytes.Contains(packetBuffer, inputToken.clientToServerKey[:]) {
+		t.Fatal("clientToServerKey remained in caller packetBuffer after Server.ProcessPacket")
+	}
+	if bytes.Contains(packetBuffer, inputToken.serverToClientKey[:]) {
+		t.Fatal("serverToClientKey remained in caller packetBuffer after Server.ProcessPacket")
+	}
+}
+
+func TestServerCloseZeroesPrivateKey(t *testing.T) {
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
+	check(t, err == nil)
+
+	server.Start(1)
+	server.Stop()
+
+	// the server keeps its own key across Stop so it can be started again
+	if server.config.PrivateKey != testPrivateKey {
+		t.Fatal("Stop changed the server's private key")
+	}
+
+	server.Start(1)
+	server.Close()
+
+	if server.config.PrivateKey != ([KeyBytes]byte{}) {
+		t.Fatal("Close did not zero the server's private key")
+	}
+}
+
+func TestServerIgnoredConnectionRequestClearsTokenData(t *testing.T) {
+	serverAddress, err := ParseAddress("127.0.0.1:40000")
+	check(t, err == nil)
+	clientAddress, err := ParseAddress("127.0.0.1:50000")
+	check(t, err == nil)
+
+	userData := make([]byte, UserDataBytes)
+	RandomBytes(userData)
+	inputToken := generateConnectTokenPrivate(testClientID, testTimeoutSeconds, []Address{serverAddress}, userData)
+
+	var connectTokenData [connectTokenPrivateBytes]byte
+	inputToken.write(connectTokenData[:])
+
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 1000.0)
+	check(t, err == nil)
+	defer server.Close()
+
+	server.flags = serverFlagIgnoreConnectionRequestPackets
+
+	request := &connectionRequest{
+		versionInfo:                 versionInfo,
+		protocolID:                  testProtocolID,
+		connectTokenExpireTimestamp: uint64(1) << 62,
+		connectTokenData:            connectTokenData,
+	}
+	server.processPacketInternal(&clientAddress, request, 0, -1, -1, 0)
+
+	if bytes.Contains(request.connectTokenData[:], inputToken.clientToServerKey[:]) {
+		t.Fatal("clientToServerKey remained in an ignored connection request")
+	}
+	if bytes.Contains(request.connectTokenData[:], inputToken.serverToClientKey[:]) {
+		t.Fatal("serverToClientKey remained in an ignored connection request")
+	}
+}
+
+func TestServerCloseBeforeStartZeroesPrivateKey(t *testing.T) {
+	serverConfig := &ServerConfig{
+		ProtocolID:       testProtocolID,
+		PrivateKey:       testPrivateKey,
+		NetworkSimulator: NewNetworkSimulator(),
+	}
+	server, err := NewServer("127.0.0.1:40000", serverConfig, 0.0)
+	check(t, err == nil)
+
+	server.Close()
+
+	if server.config.PrivateKey != ([KeyBytes]byte{}) {
+		t.Fatal("Close before Start did not zero the server's private key")
+	}
+}
+
+func TestEncryptionManagerZerosKeysOfExpiredMappings(t *testing.T) {
+	var zeroKey [KeyBytes]byte
+
+	address := func(port uint16) Address {
+		return Address{Type: AddressIPv4, IPv4: [4]byte{127, 0, 0, 1}, Port: port}
+	}
+
+	currentTime := 1000.0
+	expiredTime := currentTime + testTimeoutSeconds*2
+
+	// removing the last mapping trims the expired, unowned mappings behind it.
+	// a mapping owned by a connected client is never trimmed and keeps its keys.
+	{
+		var manager encryptionManager
+		manager.reset()
+
+		addresses := []Address{address(20000), address(20001), address(20002)}
+		for i := range addresses {
+			check(t, manager.addEncryptionMapping(&addresses[i], GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		}
+		manager.clientIndex[0] = 0
+		ownedSendKey := manager.sendKey[0]
+		ownedReceiveKey := manager.receiveKey[0]
+
+		check(t, manager.removeEncryptionMapping(&addresses[2], expiredTime))
+		check(t, manager.numEncryptionMappings == 1)
+
+		for i := 1; i < len(addresses); i++ {
+			if manager.sendKey[i] != zeroKey || manager.receiveKey[i] != zeroKey {
+				t.Fatalf("keys of trimmed encryption mapping %d were not zeroed", i)
+			}
+		}
+		check(t, manager.sendKey[0] == ownedSendKey)
+		check(t, manager.receiveKey[0] == ownedReceiveKey)
+	}
+
+	// an expired mapping is never found. the sweep the server runs each update zeros the
+	// keys of an expired, unowned mapping. an owned one keeps them.
+	{
+		var manager encryptionManager
+		manager.reset()
+
+		unowned := address(30000)
+		owned := address(30001)
+		check(t, manager.addEncryptionMapping(&unowned, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		check(t, manager.addEncryptionMapping(&owned, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		manager.clientIndex[1] = 0
+		ownedSendKey := manager.sendKey[1]
+		ownedReceiveKey := manager.receiveKey[1]
+
+		check(t, manager.findEncryptionMapping(&unowned, expiredTime) == -1)
+		check(t, manager.findEncryptionMapping(&owned, expiredTime) == -1)
+
+		manager.clearExpiredKeys(expiredTime)
+
+		if manager.sendKey[0] != zeroKey || manager.receiveKey[0] != zeroKey {
+			t.Fatal("keys of expired encryption mapping were not zeroed by the sweep")
+		}
+		check(t, manager.sendKey[1] == ownedSendKey)
+		check(t, manager.receiveKey[1] == ownedReceiveKey)
+	}
+
+	// adding a different address, or the sweep, zeros the keys of every expired, unowned mapping.
+	// an add reuses the first expired slot, so the check is on the second one.
+	for _, add := range []bool{false, true} {
+		var manager encryptionManager
+		manager.reset()
+
+		first := address(40000)
+		second := address(40001)
+		owned := address(40002)
+		other := address(40003)
+		check(t, manager.addEncryptionMapping(&first, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		check(t, manager.addEncryptionMapping(&second, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		check(t, manager.addEncryptionMapping(&owned, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+		manager.clientIndex[2] = 0
+		ownedSendKey := manager.sendKey[2]
+		ownedReceiveKey := manager.receiveKey[2]
+
+		if add {
+			check(t, manager.addEncryptionMapping(&other, GenerateKey(), GenerateKey(), expiredTime, -1.0, testTimeoutSeconds, -1))
+			check(t, manager.address[0].Equal(other))
+		} else {
+			check(t, manager.findEncryptionMapping(&other, expiredTime) == -1)
+			manager.clearExpiredKeys(expiredTime)
+			if manager.sendKey[0] != zeroKey || manager.receiveKey[0] != zeroKey {
+				t.Fatal("keys of expired encryption mapping were not zeroed by the sweep")
+			}
+		}
+
+		if manager.sendKey[1] != zeroKey || manager.receiveKey[1] != zeroKey {
+			t.Fatalf("keys of expired encryption mapping were not zeroed (add=%v)", add)
+		}
+		check(t, manager.sendKey[2] == ownedSendKey)
+		check(t, manager.receiveKey[2] == ownedReceiveKey)
+	}
+
+	// the server's update zeros the keys of expired, unowned mappings with no lookups at all.
+	{
+		serverConfig := &ServerConfig{
+			ProtocolID:       testProtocolID,
+			PrivateKey:       testPrivateKey,
+			NetworkSimulator: NewNetworkSimulator(),
+		}
+		server, err := NewServer("127.0.0.1:40000", serverConfig, currentTime)
+		check(t, err == nil)
+		defer server.Close()
+		server.Start(1)
+
+		expired := address(50000)
+		check(t, server.encryptionManager.addEncryptionMapping(&expired, GenerateKey(), GenerateKey(), currentTime, -1.0, testTimeoutSeconds, -1))
+
+		server.Update(expiredTime)
+
+		if server.encryptionManager.sendKey[0] != zeroKey || server.encryptionManager.receiveKey[0] != zeroKey {
+			t.Fatal("keys of expired encryption mapping were not zeroed by the server update")
+		}
+	}
+}
+
+func TestSocketBufferSizeBackOff(t *testing.T) {
+	const requested = 4 * 1024 * 1024
+
+	t.Run("accepts the request on the first try", func(t *testing.T) {
+		calls := 0
+		set := func(size int) error {
+			calls++
+			if size != requested {
+				return errors.New("buffer size refused")
+			}
+			return nil
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, ok)
+		check(t, size == requested)
+		check(t, calls == 1)
+	})
+
+	t.Run("backs off by powers of two to 65536", func(t *testing.T) {
+		const accepted = 65536
+		var attempted []int
+		set := func(size int) error {
+			attempted = append(attempted, size)
+			if size == accepted {
+				return nil
+			}
+			return errors.New("buffer size refused")
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, ok)
+		check(t, size == accepted)
+
+		want := []int{
+			4 * 1024 * 1024,
+			2 * 1024 * 1024,
+			1 * 1024 * 1024,
+			512 * 1024,
+			256 * 1024,
+			128 * 1024,
+			65536,
+		}
+		check(t, len(attempted) == len(want))
+		for i := range want {
+			check(t, attempted[i] == want[i])
+		}
+	})
+
+	// A stock NetBSD refuses anything over about 227 KiB, including 256 KiB.
+	t.Run("accepts 128KiB when 256KiB is refused", func(t *testing.T) {
+		const limit = 227 * 1024
+		calls := 0
+		set := func(size int) error {
+			calls++
+			if size <= limit {
+				return nil
+			}
+			return errors.New("buffer size refused")
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, ok)
+		check(t, size == 128*1024)
+		check(t, calls == 6)
+	})
+
+	t.Run("keeps the OS default when every size is refused", func(t *testing.T) {
+		var attempted []int
+		set := func(size int) error {
+			attempted = append(attempted, size)
+			return errors.New("buffer size refused")
+		}
+
+		size, ok := setSocketBufferSize(requested, set)
+		check(t, !ok)
+		check(t, size == 0)
+		check(t, len(attempted) == 7)
+		check(t, attempted[len(attempted)-1] == 65536)
+	})
+
+	t.Run("does not try a request already below 65536", func(t *testing.T) {
+		calls := 0
+		set := func(int) error {
+			calls++
+			return nil
+		}
+
+		size, ok := setSocketBufferSize(32*1024, set)
+		check(t, !ok)
+		check(t, size == 0)
+		check(t, calls == 0)
+	})
 }

@@ -1,8 +1,8 @@
 package netcode
 
 import (
+	"crypto/subtle"
 	"errors"
-	"time"
 )
 
 // Server create errors, returned from NewServer and NewServerDual. Bind
@@ -15,6 +15,10 @@ var (
 	ErrServerCreateSocketIPv6Failed = errors.New("netcode: failed to create server ipv6 socket")
 	ErrServerBindSocketIPv4Failed   = errors.New("netcode: failed to bind server ipv4 socket")
 	ErrServerBindSocketIPv6Failed   = errors.New("netcode: failed to bind server ipv6 socket")
+
+	// ErrServerOverrideCallbacksRequired is returned when OverrideSendAndReceive
+	// is set but SendPacketOverride or ReceivePacketOverride is nil.
+	ErrServerOverrideCallbacksRequired = errors.New("netcode: OverrideSendAndReceive requires both SendPacketOverride and ReceivePacketOverride")
 )
 
 // Server flags.
@@ -40,7 +44,7 @@ type ServerConfig struct {
 
 	// MaxConnectTokenLifetime is the longest lifetime in seconds that the backend
 	// issues connect tokens with. The server ignores any connection request whose
-	// connect token expire timestamp is earlier than the server start time plus
+	// connect token expire timestamp is at or before the server start time plus
 	// this lifetime, preventing replays of connect tokens issued before the server
 	// started. If <= 0, DefaultMaxConnectTokenLifetime (30) is used.
 	MaxConnectTokenLifetime int
@@ -50,9 +54,12 @@ type ServerConfig struct {
 	NetworkSimulator *NetworkSimulator
 
 	// ConnectDisconnectCallback, if set, is called when a client connects to
-	// or disconnects from the server. During a disconnect it fires before the
-	// client slot is reset, so the slot can still be queried from inside the
-	// callback.
+	// or disconnects from the server. On disconnect the client is marked as
+	// disconnected before the callback runs, so the callback may safely call
+	// Server methods such as Stop, DisconnectClient and DisconnectAllClients
+	// without re-entering this client's disconnect. ClientID, ClientAddress,
+	// ClientUserData and ClientDisconnectReason remain valid for the duration
+	// of the callback, while ClientConnected reports false.
 	ConnectDisconnectCallback func(clientIndex int, connected bool)
 
 	// SendLoopbackPacketCallback is called to deliver packets sent to a client
@@ -61,7 +68,8 @@ type ServerConfig struct {
 
 	// OverrideSendAndReceive replaces socket send and receive with the
 	// SendPacketOverride and ReceivePacketOverride callbacks. No sockets are
-	// created.
+	// created. ReceivePacketOverride's returned packetData slice is modified in
+	// place during packet decryption.
 	OverrideSendAndReceive bool
 	SendPacketOverride     func(to *Address, packetData []byte)
 	ReceivePacketOverride  func() (packetData []byte, from Address, ok bool)
@@ -84,6 +92,7 @@ type Server struct {
 	flags                          uint32
 	time                           float64
 	running                        bool
+	closed                         bool
 	maxClients                     int
 	numConnectedClients            int
 	globalSequence                 uint64
@@ -148,6 +157,11 @@ func NewServerDual(serverAddress1String string, serverAddress2String string, con
 		configCopy.MaxConnectTokenLifetime = DefaultMaxConnectTokenLifetime
 	}
 	config = &configCopy
+
+	if config.OverrideSendAndReceive && (config.SendPacketOverride == nil || config.ReceivePacketOverride == nil) {
+		printf(LogLevelError, "error: OverrideSendAndReceive requires SendPacketOverride and ReceivePacketOverride\n")
+		return nil, ErrServerOverrideCallbacksRequired
+	}
 
 	serverAddress1, err := ParseAddress(serverAddress1String)
 	if err != nil {
@@ -236,13 +250,20 @@ func NewServer(serverAddressString string, config *ServerConfig, time float64) (
 // its sockets.
 func (server *Server) Close() {
 	server.Stop()
+	server.closed = true
+	clear(server.config.PrivateKey[:])
 	server.socketHolder.destroy()
 }
 
 // Start starts the server with the given number of client slots, in
 // [1,MaxClients]. If the server is already running it is stopped and
-// restarted.
+// restarted. A server that has been closed cannot be started.
 func (server *Server) Start(maxClients int) {
+	if server.closed {
+		printf(LogLevelError, "error: server is closed and cannot be started\n")
+		return
+	}
+
 	// the per-client arrays are sized MaxClients. an out of range value must not get through
 
 	if maxClients <= 0 || maxClients > MaxClients {
@@ -267,7 +288,7 @@ func (server *Server) Start(maxClients int) {
 	server.globalSequence = 1 << 63
 	server.challengeSequence = 0
 	RandomBytes(server.challengeKey[:])
-	server.minConnectTokenExpireTimestamp = uint64(time.Now().Unix()) + uint64(server.config.MaxConnectTokenLifetime)
+	server.minConnectTokenExpireTimestamp = nowUnix() + uint64(server.config.MaxConnectTokenLifetime)
 
 	for i := 0; i < server.maxClients; i++ {
 		server.clientPacketQueue[i].clear()
@@ -336,6 +357,8 @@ func (server *Server) sendClientPacket(p packet, clientIndex int) {
 func (server *Server) resetClientSlot(clientIndex int) {
 	server.clientPacketQueue[clientIndex].clear()
 
+	// the caller has already marked the slot disconnected and counted it out
+
 	server.clientConnected[clientIndex] = false
 	server.clientLoopback[clientIndex] = false
 	server.clientConfirmed[clientIndex] = false
@@ -346,20 +369,22 @@ func (server *Server) resetClientSlot(clientIndex int) {
 	server.clientAddress[clientIndex] = Address{}
 	server.clientEncryptionIndex[clientIndex] = -1
 	server.clientUserData[clientIndex] = [UserDataBytes]byte{}
-
-	server.numConnectedClients--
 }
 
 func (server *Server) disconnectClientInternal(clientIndex int, sendDisconnectPackets bool, disconnectReason int) {
+	if clientIndex < 0 || clientIndex >= server.maxClients {
+		return
+	}
+
+	if !server.clientConnected[clientIndex] {
+		return
+	}
+
 	printf(LogLevelInfo, "server disconnected client %d\n", clientIndex)
 
 	// record why before the callback fires, so the reason can be queried from inside the callback
 
 	server.clientDisconnectReason[clientIndex] = disconnectReason
-
-	if server.config.ConnectDisconnectCallback != nil {
-		server.config.ConnectDisconnectCallback(clientIndex, false)
-	}
 
 	if sendDisconnectPackets {
 		printf(LogLevelDebug, "server sent disconnect packets to client %d\n", clientIndex)
@@ -370,11 +395,26 @@ func (server *Server) disconnectClientInternal(clientIndex int, sendDisconnectPa
 		}
 	}
 
+	// mark the slot disconnected and drop its encryption mapping before invoking the callback.
+	// the callback may call back into the server (for example Stop or DisconnectClient) and
+	// must not re-enter the disconnect for this slot.
+
+	encryptionIndex := server.clientEncryptionIndex[clientIndex]
+
+	server.clientConnected[clientIndex] = false
+	server.numConnectedClients--
+
 	server.clientReplayProtection[clientIndex].reset()
 
-	server.encryptionManager.clientIndex[server.clientEncryptionIndex[clientIndex]] = -1
+	if encryptionIndex >= 0 {
+		server.encryptionManager.clientIndex[encryptionIndex] = -1
+		server.encryptionManager.removeEncryptionMapping(&server.clientAddress[clientIndex], server.time)
+		server.clientEncryptionIndex[clientIndex] = -1
+	}
 
-	server.encryptionManager.removeEncryptionMapping(&server.clientAddress[clientIndex], server.time)
+	if server.config.ConnectDisconnectCallback != nil {
+		server.config.ConnectDisconnectCallback(clientIndex, false)
+	}
 
 	server.resetClientSlot(clientIndex)
 }
@@ -416,8 +456,9 @@ func (server *Server) DisconnectAllClients() {
 	}
 }
 
-// Stop stops the server, disconnecting all clients. The server can be started
-// again with Start.
+// Stop stops the server, disconnecting all clients. The server keeps its own
+// copy of the configuration, so it can be started again; Close zeroes the
+// server's copy of the private key.
 func (server *Server) Stop() {
 	if !server.running {
 		return
@@ -468,8 +509,18 @@ func (server *Server) findClientIndexByAddress(address *Address) int {
 	return -1
 }
 
-func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest) {
+func (server *Server) processConnectionRequestPacket(from *Address, packet *connectionRequest, currentTimestamp uint64) {
+	defer func() {
+		clear(packet.connectTokenData[:])
+		clear(packet.clientSalt[:])
+	}()
+
 	var connectTokenPrivate connectTokenPrivate
+	defer func() {
+		clear(connectTokenPrivate.clientToServerKey[:])
+		clear(connectTokenPrivate.serverToClientKey[:])
+		clear(connectTokenPrivate.userData[:])
+	}()
 	if connectTokenPrivate.read(packet.connectTokenData[:]) != nil {
 		printf(LogLevelDebug, "server ignored connection request. failed to read connect token\n")
 		return
@@ -499,14 +550,16 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		return
 	}
 
-	currentTimestamp := uint64(time.Now().Unix())
+	connectTokenMac := packet.connectTokenData[connectTokenPrivateBytes-MacBytes:]
 
 	connectTokenEntryIndex := connectTokenEntriesFindOrAdd(&server.connectTokenEntries,
 		from,
-		packet.connectTokenData[connectTokenPrivateBytes-MacBytes:],
+		connectTokenMac,
+		packet.clientSalt,
 		packet.connectTokenExpireTimestamp,
 		currentTimestamp,
-		server.time)
+		server.time,
+		connectTokenPrivate.timeoutSeconds)
 
 	if connectTokenEntryIndex == connectTokenHistoryFull {
 		printf(LogLevelDebug, "server ignored connection request. connect token history is full\n")
@@ -520,23 +573,67 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 
 	if server.numConnectedClients == server.maxClients {
 		printf(LogLevelDebug, "server denied connection request. server is full\n")
-		server.sendGlobalPacket(&connectionDenied{}, from, connectTokenPrivate.serverToClientKey[:])
+		var deniedServerNonce [serverNonceBytes]byte
+		RandomBytes(deniedServerNonce[:])
+		deniedSendKey := derivePacketKey(connectTokenPrivate.serverToClientKey, packet.clientSalt, deniedServerNonce)
+		server.sendGlobalPacket(&connectionDenied{serverNonce: deniedServerNonce}, from, deniedSendKey[:])
+		clear(deniedServerNonce[:])
+		clear(deniedSendKey[:])
 		return
 	}
 
-	expireTime := -1.0
+	tokenLifetime := packet.connectTokenExpireTimestamp - currentTimestamp
+	if packet.connectTokenExpireTimestamp == 0xFFFFFFFFFFFFFFFF {
+		tokenLifetime = uint64(server.config.MaxConnectTokenLifetime)
+	}
+
+	expireTime := server.time + float64(tokenLifetime)
 	if connectTokenPrivate.timeoutSeconds >= 0 {
 		expireTime = server.time + float64(connectTokenPrivate.timeoutSeconds)
 	}
 
-	if !server.encryptionManager.addEncryptionMapping(from,
-		connectTokenPrivate.serverToClientKey[:],
-		connectTokenPrivate.clientToServerKey[:],
-		server.time,
-		expireTime,
-		connectTokenPrivate.timeoutSeconds,
-		connectTokenEntryIndex) {
-		printf(LogLevelDebug, "server ignored connection request. failed to add encryption mapping\n")
+	encryptionIndex := server.encryptionManager.findEncryptionMapping(from, server.time)
+
+	if encryptionIndex >= 0 &&
+		server.encryptionManager.clientIndex[encryptionIndex] == -1 &&
+		subtle.ConstantTimeCompare(server.encryptionManager.connectTokenMac[encryptionIndex][:], connectTokenMac) == 1 &&
+		subtle.ConstantTimeCompare(server.encryptionManager.clientSalt[encryptionIndex][:], packet.clientSalt[:]) == 1 {
+		server.encryptionManager.setExpireTime(encryptionIndex, expireTime)
+	} else {
+		var serverNonce [serverNonceBytes]byte
+		RandomBytes(serverNonce[:])
+		sendKey := derivePacketKey(connectTokenPrivate.serverToClientKey, packet.clientSalt, serverNonce)
+		receiveKey := derivePacketKey(connectTokenPrivate.clientToServerKey, packet.clientSalt, serverNonce)
+
+		if !server.encryptionManager.addEncryptionMapping(from,
+			sendKey[:],
+			receiveKey[:],
+			server.time,
+			expireTime,
+			connectTokenPrivate.timeoutSeconds,
+			connectTokenEntryIndex,
+			connectTokenMac) {
+			printf(LogLevelDebug, "server ignored connection request. failed to add encryption mapping\n")
+			clear(serverNonce[:])
+			clear(sendKey[:])
+			clear(receiveKey[:])
+			return
+		}
+
+		encryptionIndex = server.encryptionManager.findEncryptionMapping(from, server.time)
+		if encryptionIndex >= 0 {
+			server.encryptionManager.clientSalt[encryptionIndex] = packet.clientSalt
+			server.encryptionManager.serverNonce[encryptionIndex] = serverNonce
+		}
+
+		clear(serverNonce[:])
+		clear(sendKey[:])
+		clear(receiveKey[:])
+	}
+
+	mappingSendKey := server.encryptionManager.getSendKey(encryptionIndex)
+	mappingServerNonce, ok := server.encryptionManager.getServerNonce(encryptionIndex)
+	if mappingSendKey == nil || !ok {
 		return
 	}
 
@@ -546,6 +643,7 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 	}
 
 	challengePacket := &connectionChallenge{
+		serverNonce:            mappingServerNonce,
 		challengeTokenSequence: server.challengeSequence,
 	}
 	challengeToken.write(challengePacket.challengeTokenData[:])
@@ -558,7 +656,7 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 
 	printf(LogLevelDebug, "server sent connection challenge packet\n")
 
-	server.sendGlobalPacket(challengePacket, from, connectTokenPrivate.serverToClientKey[:])
+	server.sendGlobalPacket(challengePacket, from, mappingSendKey)
 }
 
 func (server *Server) findFreeClientIndex() int {
@@ -593,10 +691,13 @@ func (server *Server) connectClient(clientIndex int, address *Address, clientID 
 
 	connectTokenEntryIndex := server.encryptionManager.getConnectTokenEntryIndex(encryptionIndex)
 	if connectTokenEntryIndex >= 0 {
-		connectTokenEntriesConsume(&server.connectTokenEntries, connectTokenEntryIndex)
+		connectTokenEntriesConsume(&server.connectTokenEntries, connectTokenEntryIndex,
+			server.encryptionManager.getConnectTokenMac(encryptionIndex))
 	}
 
-	printf(LogLevelInfo, "server accepted client %s %.16x in slot %d\n", address.String(), clientID, clientIndex)
+	if logLevel >= LogLevelInfo {
+		printf(LogLevelInfo, "server accepted client %s %.16x in slot %d\n", address.String(), clientID, clientIndex)
+	}
 
 	packet := &connectionKeepAlive{
 		clientIndex: int32(clientIndex),
@@ -640,7 +741,11 @@ func (server *Server) processConnectionResponsePacket(from *Address, packet *con
 
 	if server.numConnectedClients == server.maxClients {
 		printf(LogLevelDebug, "server denied connection response. server is full\n")
-		server.sendGlobalPacket(&connectionDenied{}, from, packetSendKey)
+		serverNonce, ok := server.encryptionManager.getServerNonce(encryptionIndex)
+		if !ok {
+			return
+		}
+		server.sendGlobalPacket(&connectionDenied{serverNonce: serverNonce}, from, packetSendKey)
 		return
 	}
 
@@ -651,17 +756,24 @@ func (server *Server) processConnectionResponsePacket(from *Address, packet *con
 	server.connectClient(clientIndex, from, challengeToken.clientID, encryptionIndex, timeoutSeconds, challengeToken.userData[:])
 }
 
-func (server *Server) processPacketInternal(from *Address, p packet, sequence uint64, encryptionIndex int, clientIndex int) {
+func (server *Server) processPacketInternal(from *Address, p packet, sequence uint64, encryptionIndex int, clientIndex int, currentTimestamp uint64) {
 	switch t := p.(type) {
 	case *connectionRequest:
 		if server.flags&serverFlagIgnoreConnectionRequestPackets == 0 {
-			printf(LogLevelDebug, "server received connection request from %s\n", from.String())
-			server.processConnectionRequestPacket(from, t)
+			if logLevel >= LogLevelDebug {
+				printf(LogLevelDebug, "server received connection request from %s\n", from.String())
+			}
+			server.processConnectionRequestPacket(from, t, currentTimestamp)
+		} else {
+			clear(t.connectTokenData[:])
+			clear(t.clientSalt[:])
 		}
 
 	case *connectionResponse:
 		if server.flags&serverFlagIgnoreConnectionResponsePackets == 0 {
-			printf(LogLevelDebug, "server received connection response from %s\n", from.String())
+			if logLevel >= LogLevelDebug {
+				printf(LogLevelDebug, "server received connection response from %s\n", from.String())
+			}
 			server.processConnectionResponsePacket(from, t, encryptionIndex)
 		}
 
@@ -690,6 +802,16 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 		if clientIndex != -1 {
 			printf(LogLevelDebug, "server received disconnect packet from client %d\n", clientIndex)
 			server.disconnectClientInternal(clientIndex, false, DisconnectReasonClientDisconnect)
+		} else if encryptionIndex != -1 {
+			if logLevel >= LogLevelDebug {
+				printf(LogLevelDebug, "server received disconnect packet from %s before connection completed\n", from.String())
+			}
+			connectTokenEntryIndex := server.encryptionManager.getConnectTokenEntryIndex(encryptionIndex)
+			if connectTokenEntryIndex >= 0 {
+				connectTokenEntriesConsume(&server.connectTokenEntries, connectTokenEntryIndex,
+					server.encryptionManager.getConnectTokenMac(encryptionIndex))
+			}
+			server.encryptionManager.removeEncryptionMapping(from, server.time)
 		}
 	}
 }
@@ -697,11 +819,11 @@ func (server *Server) processPacketInternal(from *Address, p packet, sequence ui
 // ProcessPacket processes a raw packet received from the given address, as if
 // it had arrived on one of the server's sockets. This is useful together with
 // ServerConfig.OverrideSendAndReceive to drive the server with your own
-// transport.
+// transport. packetData is modified in place during decryption.
 func (server *Server) ProcessPacket(from *Address, packetData []byte) {
 	allowedPackets := serverAllowedPackets()
 
-	currentTimestamp := uint64(time.Now().Unix())
+	currentTimestamp := nowUnix()
 
 	server.readAndProcessPacket(from, packetData, currentTimestamp, &allowedPackets)
 }
@@ -738,7 +860,9 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 	readPacketKey := server.encryptionManager.getReceiveKey(encryptionIndex)
 
 	if readPacketKey == nil && packetData[0] != 0 {
-		printf(LogLevelDebug, "server could not process packet because no encryption mapping exists for %s\n", from.String())
+		if logLevel >= LogLevelDebug {
+			printf(LogLevelDebug, "server could not process packet because no encryption mapping exists for %s\n", from.String())
+		}
 		return
 	}
 
@@ -761,13 +885,13 @@ func (server *Server) readAndProcessPacket(from *Address, packetData []byte, cur
 		return
 	}
 
-	server.processPacketInternal(from, packet, sequence, encryptionIndex, clientIndex)
+	server.processPacketInternal(from, packet, sequence, encryptionIndex, clientIndex, currentTimestamp)
 }
 
 func (server *Server) receivePackets() {
 	allowedPackets := serverAllowedPackets()
 
-	currentTimestamp := uint64(time.Now().Unix())
+	currentTimestamp := nowUnix()
 
 	if server.config.NetworkSimulator == nil {
 		// process packets received from sockets
@@ -1019,11 +1143,13 @@ func (server *Server) MaxClients() int {
 // Update advances the server to the given time: it receives and processes
 // packets, sends keep-alive packets, and times out clients. Call it regularly,
 // for example 60 times per second.
+// time must be monotonically non-decreasing across calls.
 func (server *Server) Update(time float64) {
 	server.time = time
 	server.receivePackets()
 	server.sendPackets()
 	server.checkForTimeouts()
+	server.encryptionManager.clearExpiredKeys(server.time)
 }
 
 // ConnectLoopbackClient connects a client to the given slot in loopback mode.
@@ -1040,6 +1166,10 @@ func (server *Server) ConnectLoopbackClient(clientIndex int, clientID uint64, us
 	}
 
 	if server.clientConnected[clientIndex] {
+		return
+	}
+
+	if server.config.SendLoopbackPacketCallback == nil {
 		return
 	}
 
@@ -1083,6 +1213,12 @@ func (server *Server) DisconnectLoopbackClient(clientIndex int) {
 	printf(LogLevelInfo, "server disconnected loopback client %d\n", clientIndex)
 
 	server.clientDisconnectReason[clientIndex] = DisconnectReasonServerDisconnect
+
+	// mark the slot disconnected before invoking the callback, so the callback may call
+	// back into the server without re-entering this client's disconnect.
+
+	server.clientConnected[clientIndex] = false
+	server.numConnectedClients--
 
 	if server.config.ConnectDisconnectCallback != nil {
 		server.config.ConnectDisconnectCallback(clientIndex, false)
