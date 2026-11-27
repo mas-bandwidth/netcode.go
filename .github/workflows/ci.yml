@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [ main, 'sprint/*' ]
+  # every pull request, whatever its base: sprint landings target sprint/<stream> branches, not main
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -52,6 +52,31 @@ jobs:
           files: coverage.out
           use_oidc: true
           fail_ci_if_error: false
+
+  # The tests that bind real UDP sockets on loopback run only when
+  # NETCODE_FUNCTIONAL_TESTS=1 (requireFunctional in netcode_test.go), and
+  # otherwise skip. This job sets it and fails if any test still reports that
+  # skip, so a functional test that did not run can never pass as green.
+  functional:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 'stable'
+
+      - name: Functional tests (real sockets), none skipped
+        shell: bash
+        env:
+          NETCODE_FUNCTIONAL_TESTS: '1'
+        run: |
+          set -euo pipefail
+          go test -count=1 -v ./... | tee /tmp/functional.log
+          if grep -En '_test\.go:[0-9]+: set NETCODE_FUNCTIONAL_TESTS=1 to run' /tmp/functional.log; then
+            echo "::error::functional tests skipped although NETCODE_FUNCTIONAL_TESTS is set"
+            exit 1
+          fi
 
   # wire compatibility with the C reference implementation, enforced two ways:
   #
@@ -197,7 +222,7 @@ jobs:
       # silence it exists to break had moved.
       #
       # These are NOT the protocol version on the wire. That is versionInfo,
-      # "NETCODE 1.02\0", which is protocol identity and never changes.
+      # "NETCODE 1.03\0", which is protocol identity on the wire.
       #
       # If this fails, upstream cut a release. Read what changed, port whatever
       # it implies, then bump VersionFull/Major/Minor/Patch in the same commit.
@@ -248,3 +273,10 @@ jobs:
           check PATCH "$(up_num PATCH)" "$(our_num Patch)"
 
           exit $fail
+
+  roadmap:
+    name: ROADMAP.md matches docs/roadmap.sexp
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make roadmap-check

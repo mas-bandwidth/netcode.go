@@ -7,13 +7,17 @@ require (
 	golang.org/x/sys v0.50.0
 )
 
-// SECURITY: v1.0.0 through v1.0.2 reuse an AEAD (key, nonce) pair across a
-// server restart. Stop() zeroed the global packet sequence and Start() did not
-// re-seed it, so a stopped-and-restarted server re-encrypted global packets
-// (challenge, denied) from sequence 0 under the same per-connect-token
-// server-to-client key already used for per-client packets starting at 0.
-// Repeating a (key, nonce) pair voids both confidentiality and integrity for
-// ChaCha20-Poly1305. Fixed in v1.1.0, which re-seeds the global sequence to
-// 2^63 in both Start() and Stop() so the global and per-client nonce spaces
-// stay disjoint. Upgrade to v1.1.0 or later.
-retract [v1.0.0, v1.0.2]
+// SECURITY: v1.0.0 through v1.1.4 implement NETCODE 1.02 and are affected by
+// ChaCha20-Poly1305 AEAD (key, nonce) reuse vulnerabilities:
+//   - v1.0.0..v1.0.2: server global packet sequence overlaps per-client nonces
+//     across restart (GHSA-wgmm-f3w5-7c6q / GHSA-3x95-24j9-7448, fixed in v1.1.0).
+//   - v1.0.0..v1.1.3: reusing an unexpired connect token after disconnect
+//     repeats per-session AEAD nonces under the same token keys
+//     (GHSA-v29p-3vj4-vg4f, fixed in v1.1.4).
+//   - v1.0.0..v1.1.4: retried unfinished handshakes and multi-server connect
+//     tokens reuse AEAD nonces under static connect-token keys
+//     (GHSA-8mrq-q9c6-h23v, fixed in v1.2.0 / NETCODE 1.03 via per-connection
+//     HChaCha20 key derivation).
+// Repeating a (key, nonce) pair voids both confidentiality and integrity under
+// ChaCha20-Poly1305. Upgrade to v1.2.0 or later.
+retract [v1.0.0, v1.1.4]

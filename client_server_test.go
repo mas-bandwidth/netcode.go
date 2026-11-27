@@ -2198,7 +2198,7 @@ func TestClientPacketFromOtherAddressLeavesReplayProtection(t *testing.T) {
 
 	packetKey := GenerateKey()
 	copy(client.readPacketKey[:], packetKey)
-	client.hasPacketKeys = true
+	client.hasServerNonce = true
 	client.connectToken.protocolID = testProtocolID
 
 	// the connected client sends disconnect packets when closed, so give it its own write key
@@ -2304,6 +2304,7 @@ func TestConnectionRequestMappingExpiresWithConnectToken(t *testing.T) {
 		connectTokenNonce:           token.nonce,
 		connectTokenData:            token.privateData,
 	}
+	RandomBytes(packet.clientSalt[:])
 
 	check(t, decryptConnectTokenPrivate(packet.connectTokenData[:],
 		testProtocolID,

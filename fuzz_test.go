@@ -127,13 +127,17 @@ func fuzzPacketsEqual(expected, actual packet, requestTokenPlaintext []byte) boo
 			a.protocolID == e.protocolID &&
 			a.connectTokenExpireTimestamp == e.connectTokenExpireTimestamp &&
 			a.connectTokenNonce == e.connectTokenNonce &&
+			a.clientSalt == e.clientSalt &&
 			bytes.Equal(a.connectTokenData[:connectTokenPrivateBytes-MacBytes], requestTokenPlaintext)
 	case *connectionDenied:
-		_, ok := actual.(*connectionDenied)
-		return ok
+		a, ok := actual.(*connectionDenied)
+		return ok && a.serverNonce == e.serverNonce
 	case *connectionChallenge:
 		a, ok := actual.(*connectionChallenge)
-		return ok && a.challengeTokenSequence == e.challengeTokenSequence && a.challengeTokenData == e.challengeTokenData
+		return ok &&
+			a.serverNonce == e.serverNonce &&
+			a.challengeTokenSequence == e.challengeTokenSequence &&
+			a.challengeTokenData == e.challengeTokenData
 	case *connectionResponse:
 		a, ok := actual.(*connectionResponse)
 		return ok && a.challengeTokenSequence == e.challengeTokenSequence && a.challengeTokenData == e.challengeTokenData
@@ -189,6 +193,7 @@ func FuzzWriteReadPacketRoundTrip(f *testing.F) {
 			}
 			in.read(request.connectTokenNonce[:])
 			in.read(request.connectTokenData[:connectTokenPrivateBytes-MacBytes])
+			in.read(request.clientSalt[:])
 			requestTokenPlaintext = append([]byte(nil), request.connectTokenData[:connectTokenPrivateBytes-MacBytes]...)
 			if encryptConnectTokenPrivate(request.connectTokenData[:], testProtocolID, expireTimestamp, request.connectTokenNonce[:], fuzzPrivateKey) != nil {
 				return
@@ -196,10 +201,13 @@ func FuzzWriteReadPacketRoundTrip(f *testing.F) {
 			inputPacket = request
 
 		case connectionDeniedPacket:
-			inputPacket = &connectionDenied{}
+			denied := &connectionDenied{}
+			in.read(denied.serverNonce[:])
+			inputPacket = denied
 
 		case connectionChallengePacket:
 			challenge := &connectionChallenge{challengeTokenSequence: in.u64()}
+			in.read(challenge.serverNonce[:])
 			in.read(challenge.challengeTokenData[:])
 			inputPacket = challenge
 
@@ -232,12 +240,15 @@ func FuzzWriteReadPacketRoundTrip(f *testing.F) {
 			t.Fatalf("failed to write packet type %d", packetType)
 		}
 
-		// find where the encrypted body starts: prefix byte, sequence bytes,
-		// then ciphertext and MAC. A connection request's encrypted region is
-		// its connect token, which follows the clear header.
+		// find where the authenticated body starts and ends: prefix byte, sequence
+		// bytes, then (optional AAD-bound serverNonce header) ciphertext and MAC. A
+		// connection request's encrypted region is its connect token, followed by
+		// the unencrypted 8-byte clientSalt.
 		encryptedStart := 1 + sequenceNumberBytesRequired(sequence)
+		encryptedEnd := packetBytes
 		if packetType == connectionRequestPacket {
 			encryptedStart = 1 + versionInfoBytes + 8 + 8 + connectTokenNonceBytes
+			encryptedEnd = encryptedStart + connectTokenPrivateBytes
 		}
 
 		corrupted := false
@@ -252,7 +263,7 @@ func FuzzWriteReadPacketRoundTrip(f *testing.F) {
 		outputPacket := fuzzReadPacket(buffer[:packetBytes], &readSequence, nil)
 
 		if corrupted {
-			if corruptIndex >= encryptedStart && outputPacket != nil {
+			if corruptIndex >= encryptedStart && corruptIndex < encryptedEnd && outputPacket != nil {
 				t.Fatalf("packet type %d corrupted within its encrypted body or MAC read back as %T", packetType, outputPacket)
 			}
 			return

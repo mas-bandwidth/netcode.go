@@ -8,7 +8,7 @@ If this library helps you, please support it: **[Become a supporter](https://www
 
 **netcode** is a secure client/server protocol for multiplayer games built on top of UDP.
 
-This is the official Go implementation: a faithful port of the [C reference implementation](https://github.com/mas-bandwidth/netcode), written in modern, idiomatic Go. It implements the [netcode 1.02 standard](STANDARD.md) and is wire compatible with the C implementation and every other conforming implementation.
+This is the official Go implementation: a faithful port of the [C reference implementation](https://github.com/mas-bandwidth/netcode), written in modern, idiomatic Go. It implements the [netcode 1.03 standard](STANDARD.md) and is wire compatible with the C implementation and every other conforming implementation.
 
 # Design
 
@@ -145,7 +145,7 @@ Other netcode implementations include:
 * [netcode for UE4](https://github.com/RedpointGames/netcode.io-UE4)
 * [netcode for Typescript](https://github.com/bennychen/netcode.io-typescript)
 
-If you'd like to create your own implementation of netcode, please read the [netcode 1.02 standard](STANDARD.md), and see [IMPLEMENTERS.md](https://github.com/mas-bandwidth/netcode/blob/main/IMPLEMENTERS.md) for findings other implementations should check themselves against.
+If you'd like to create your own implementation of netcode, please read the [netcode 1.03 standard](STANDARD.md), and see [IMPLEMENTERS.md](https://github.com/mas-bandwidth/netcode/blob/main/IMPLEMENTERS.md) for findings other implementations should check themselves against.
 
 # Author
 
