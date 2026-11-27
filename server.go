@@ -647,7 +647,7 @@ func (server *Server) processConnectionRequestPacket(from *Address, packet *conn
 		challengeTokenSequence: server.challengeSequence,
 	}
 	challengeToken.write(challengePacket.challengeTokenData[:])
-	if encryptChallengeToken(challengePacket.challengeTokenData[:], server.challengeSequence, server.challengeKey[:]) != nil {
+	if encryptChallengeToken(challengePacket.challengeTokenData[:], server.challengeSequence, connectTokenMac, server.challengeKey[:]) != nil {
 		printf(LogLevelDebug, "server ignored connection request. failed to encrypt challenge token\n")
 		return
 	}
@@ -711,7 +711,16 @@ func (server *Server) connectClient(clientIndex int, address *Address, clientID 
 }
 
 func (server *Server) processConnectionResponsePacket(from *Address, packet *connectionResponse, encryptionIndex int) {
-	if decryptChallengeToken(packet.challengeTokenData[:], packet.challengeTokenSequence, server.challengeKey[:]) != nil {
+	// the challenge was encrypted with the MAC of the connect token that created this
+	// mapping as associated data: a challenge sent on another mapping does not decrypt here
+
+	if server.encryptionManager.getConnectTokenEntryIndex(encryptionIndex) < 0 {
+		printf(LogLevelDebug, "server ignored connection response. no connect token for this encryption mapping\n")
+		return
+	}
+	connectTokenMac := server.encryptionManager.getConnectTokenMac(encryptionIndex)
+
+	if decryptChallengeToken(packet.challengeTokenData[:], packet.challengeTokenSequence, connectTokenMac, server.challengeKey[:]) != nil {
 		printf(LogLevelDebug, "server ignored connection response. failed to decrypt challenge token\n")
 		return
 	}

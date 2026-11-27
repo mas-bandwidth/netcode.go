@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -2327,4 +2328,149 @@ func TestConnectionRequestMappingExpiresWithConnectToken(t *testing.T) {
 	afterTokenExpires := currentTime + 3.0
 
 	check(t, server.encryptionManager.findEncryptionMapping(&from, afterTokenExpires) == -1)
+}
+
+// A connection response is accepted only with the challenge that was sent on its
+// own encryption mapping. A client holding connect token B must not connect with
+// token A's challenge (and so A's client id and user data, leaving A's history
+// entry unspent), and a second request for one token on one mapping leaves its
+// first challenge valid. Socketless: packets are captured from the send override
+// and fed to the server directly at a fixed Unix time.
+func TestConnectionResponseRefusesAnotherMappingsChallenge(t *testing.T) {
+	const serverAddress = "[::1]:40000"
+	var sent []struct {
+		to   Address
+		data []byte
+	}
+	server, err := NewServer(serverAddress, &ServerConfig{
+		ProtocolID:             testProtocolID,
+		PrivateKey:             testPrivateKey,
+		OverrideSendAndReceive: true,
+		SendPacketOverride: func(to *Address, data []byte) {
+			sent = append(sent, struct {
+				to   Address
+				data []byte
+			}{*to, bytes.Clone(data)})
+		},
+		ReceivePacketOverride: func() ([]byte, Address, bool) { return nil, Address{}, false },
+	}, 0)
+	check(t, err == nil)
+	defer server.Close()
+
+	const now = uint64(1700000000)
+	previousNowUnix := nowUnix
+	nowUnix = func() uint64 { return now - 1 }
+	server.Start(4)
+	nowUnix = func() uint64 { return now }
+	defer func() { nowUnix = previousNowUnix }()
+
+	var tokens [3]connectToken
+	for i, spec := range []struct {
+		id   uint64
+		user byte
+	}{{0x1111, 0xA1}, {0x2222, 0xB2}, {0x3333, 0xC3}} {
+		userData := bytes.Repeat([]byte{spec.user}, UserDataBytes)
+		data, err := GenerateConnectToken([]string{serverAddress}, []string{serverAddress},
+			testConnectTokenExpiry, testTimeoutSeconds, spec.id, testProtocolID, testPrivateKey[:], userData)
+		check(t, err == nil)
+		check(t, tokens[i].read(data) == nil)
+	}
+
+	x, err := ParseAddress("[::1]:50000")
+	check(t, err == nil)
+	y, err := ParseAddress("[::1]:50001")
+	check(t, err == nil)
+
+	currentTime := 0.0
+	advance := func() {
+		currentTime += 0.1
+		server.time = currentTime
+	}
+
+	request := func(from *Address, token *connectToken, salt byte) connectionChallenge {
+		t.Helper()
+		advance()
+		packet := &connectionRequest{
+			versionInfo:                 versionInfo,
+			protocolID:                  token.protocolID,
+			connectTokenExpireTimestamp: token.expireTimestamp,
+			connectTokenNonce:           token.nonce,
+			connectTokenData:            token.privateData,
+		}
+		for i := range packet.clientSalt {
+			packet.clientSalt[i] = salt
+		}
+		check(t, decryptConnectTokenPrivate(packet.connectTokenData[:], testProtocolID,
+			packet.connectTokenExpireTimestamp, packet.connectTokenNonce[:], testPrivateKey[:]) == nil)
+		server.processConnectionRequestPacket(from, packet, nowUnix())
+		index := server.encryptionManager.findEncryptionMapping(from, server.time)
+		check(t, index >= 0)
+		key := server.encryptionManager.getSendKey(index)
+		allowed := [connectionNumPackets]bool{}
+		allowed[connectionChallengePacket] = true
+		for i := len(sent) - 1; i >= 0; i-- {
+			if !sent[i].to.Equal(*from) {
+				continue
+			}
+			var sequence uint64
+			p := readPacket(bytes.Clone(sent[i].data), &sequence, key, testProtocolID, 0, 0, nil, &allowed, nil)
+			if challenge, ok := p.(*connectionChallenge); ok {
+				return *challenge
+			}
+		}
+		t.Fatal("no challenge sent")
+		return connectionChallenge{}
+	}
+
+	response := func(from *Address, challenge connectionChallenge) {
+		advance()
+		index := server.encryptionManager.findEncryptionMapping(from, server.time)
+		check(t, index >= 0)
+		server.processConnectionResponsePacket(from, &connectionResponse{
+			challengeTokenSequence: challenge.challengeTokenSequence,
+			challengeTokenData:     challenge.challengeTokenData,
+		}, index)
+	}
+
+	var out strings.Builder
+	step := func(name string) {
+		fmt.Fprintf(&out, "%s:", name)
+		for _, id := range []uint64{0x1111, 0x2222, 0x3333} {
+			for slot := 0; slot < server.maxClients; slot++ {
+				if server.clientConnected[slot] && server.clientID[slot] == id {
+					fmt.Fprintf(&out, " %04x/%02x", id, server.clientUserData[slot][0])
+				}
+			}
+		}
+		out.WriteByte('\n')
+	}
+
+	challengeA := request(&x, &tokens[0], 0x01)
+	step("request-a")
+	challengeB := request(&y, &tokens[1], 0x02)
+	step("request-b")
+	response(&y, challengeA)
+	step("response-b-with-a")
+	response(&y, challengeB)
+	step("response-b-with-b")
+	challengeCFirst := request(&x, &tokens[2], 0x03)
+	step("request-c-first")
+	_ = request(&x, &tokens[2], 0x03)
+	step("request-c-second")
+	response(&x, challengeA)
+	step("response-c-with-a")
+	response(&x, challengeCFirst)
+	step("response-c-with-c-first")
+
+	want := "request-a:\n" +
+		"request-b:\n" +
+		"response-b-with-a:\n" +
+		"response-b-with-b: 2222/b2\n" +
+		"request-c-first: 2222/b2\n" +
+		"request-c-second: 2222/b2\n" +
+		"response-c-with-a: 2222/b2\n" +
+		"response-c-with-c-first: 2222/b2 3333/c3\n"
+	if got := out.String(); got != want {
+		t.Fatalf("connection response transcript differs:\nwant:\n%s\ngot:\n%s", want, got)
+	}
 }
