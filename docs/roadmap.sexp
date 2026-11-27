@@ -4,12 +4,10 @@
 ; :tested-revision is the main commit whose CI passed with that evidence.
 (:schema 1
  :root "goal"
- :page (:title "netcode.go roadmap"
-        :roadmaps ("connection" "security" "network" "compat" "testing"))
+ :page (:roadmaps ("connection" "security" "network" "compat" "testing"))
  :nodes
  ((:id "goal" :type :work-set :children ("connection" "security" "network" "compat" "testing"))
   (:id "connection" :type :roadmap :title "Connection"
-   :text "Connect tokens, client slots, the handshake, keep-alive, disconnects and timeouts between a client and a server."
    :rows (("connect-tokens" "connect tokens issued by a web backend")
           ("handshake" "request, challenge and response handshake")
           ("slots" "client slots; a full server denies at once")
@@ -66,7 +64,6 @@
    :note "Connect and connectToNextServer should skip an address whose family has no socket (simulator and override modes exempt), and set ClientStateInvalidConnectToken if none is usable."
    :sprint-card "go-netcode-client-refuses-a-server-address-it-has-no-socket-for")
   (:id "security" :type :roadmap :title "Security"
-   :text "Encrypted, signed packets and the protections against forged, replayed and malformed traffic."
    :rows (("aead" "encrypted and signed packets (ChaCha20-Poly1305)")
           ("private-token" "encrypted connect token private data (XChaCha20-Poly1305)")
           ("replay" "replay protection")
@@ -119,7 +116,6 @@
    :note "Two servers in one token must not encrypt global packets under the same key and nonce."
    :sprint-card "go-netcode-global-packet-nonces-differ-between-servers-sharing-a-token")
   (:id "network" :type :roadmap :title "Networking"
-   :text "Sockets, address families, platforms and the tools for testing under bad networks."
    :rows (("ipv4" "IPv4")
           ("ipv6" "IPv6")
           ("dual-stack" "dual-stack server (IPv4 and IPv6 at once)")
@@ -140,7 +136,6 @@
   (:id "network/simulator" :type :task :title "network simulator: latency, jitter, loss, duplicates" :state :done :evidence ("netcode_test.go: TestNetworkSimulatorDeterminism") :tested-revision "b709cb150b7c562828d3d9a7f237361681efaf3f")
   (:id "network/platforms" :type :task :title "Linux, macOS and Windows" :state :done :evidence (".github/workflows/ci.yml: test job, matrix ubuntu-latest, macos-latest, windows-latest, green on b709cb1") :tested-revision "b709cb150b7c562828d3d9a7f237361681efaf3f")
   (:id "compat" :type :roadmap :title "Compatibility"
-   :text "Wire compatibility with the C reference implementation and the netcode 1.02 standard."
    :rows (("standard" "netcode 1.02 standard, kept in sync with upstream")
           ("golden-vectors" "every token and packet type byte-identical to C (golden vectors)")
           ("c-interop" "live handshakes with the C client and server, both directions")
@@ -158,7 +153,6 @@
   (:id "compat/version" :type :task :title "version tracks the C reference (1.4.8)" :state :done :evidence ("commit 7d4daec (C 1.4.8 lifecycle, #29)" ".github/workflows/ci.yml: version-sync job") :tested-revision "b709cb150b7c562828d3d9a7f237361681efaf3f")
   (:id "compat/c-api" :type :task :title "API maps one to one onto the C API" :state :done :evidence ("example_test.go: ExampleNewServer" "example_test.go: ExampleNewClient") :tested-revision "b709cb150b7c562828d3d9a7f237361681efaf3f")
   (:id "testing" :type :roadmap :title "Testing"
-   :text "How the implementation is checked on every change."
    :rows (("race" "race detector on every change")
           ("fuzz" "fuzz targets ported from the C harnesses")
           ("soak" "soak test")

@@ -4,7 +4,7 @@
 # renders (CI runs it). Edit the data, never the page; `nova-roadmap help form`
 # documents the form. The pinned binary is downloaded once into bin/ and checked
 # against the release's SHA256SUMS; NOVA_ROADMAP=<path> runs another one.
-NOVA_ROADMAP_VERSION ?= v1.6.0
+NOVA_ROADMAP_VERSION ?= v2.0.86
 NOVA_ROADMAP ?= bin/nova-roadmap-$(NOVA_ROADMAP_VERSION)
 
 .PHONY: roadmap roadmap-check
