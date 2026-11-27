@@ -450,11 +450,11 @@ func TestChallengeToken(t *testing.T) {
 	sequence := uint64(1000)
 	key := GenerateKey()
 
-	check(t, encryptChallengeToken(buffer[:], sequence, key) == nil)
+	check(t, encryptChallengeToken(buffer[:], sequence, nil, key) == nil)
 
 	// decrypt the buffer
 
-	check(t, decryptChallengeToken(buffer[:], sequence, key) == nil)
+	check(t, decryptChallengeToken(buffer[:], sequence, nil, key) == nil)
 
 	// read the challenge token back in
 
@@ -2382,4 +2382,42 @@ func TestSocketBufferSizeBackOff(t *testing.T) {
 		check(t, size == 0)
 		check(t, calls == 0)
 	})
+}
+
+// A challenge encrypted for one connect token must authenticate with that
+// token's MAC and refuse the MAC of another connect token.
+func TestChallengeTokenBindsToItsConnectToken(t *testing.T) {
+	var token challengeToken
+	token.clientID = 0x1111
+	token.userData[0] = 0xA1
+	var encrypted [challengeTokenBytes]byte
+	token.write(encrypted[:])
+	var macA, macB [MacBytes]byte
+	macA[0] = 0xA1
+	macB[0] = 0xB2
+	var key [KeyBytes]byte
+	key[0] = 0xC3
+	const sequence = uint64(7)
+	if err := encryptChallengeToken(encrypted[:], sequence, macA[:], key[:]); err != nil {
+		t.Fatal(err)
+	}
+	wrong := encrypted
+	if err := decryptChallengeToken(wrong[:], sequence, macB[:], key[:]); err == nil {
+		t.Fatal("challenge decrypted against another connect token MAC")
+	}
+	none := encrypted
+	if err := decryptChallengeToken(none[:], sequence, nil, key[:]); err == nil {
+		t.Fatal("challenge decrypted with no associated data")
+	}
+	right := encrypted
+	if err := decryptChallengeToken(right[:], sequence, macA[:], key[:]); err != nil {
+		t.Fatalf("challenge did not decrypt against its connect token MAC: %v", err)
+	}
+	var decoded challengeToken
+	if err := decoded.read(right[:]); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.clientID != token.clientID || decoded.userData != token.userData {
+		t.Fatal("decrypted challenge data changed")
+	}
 }
